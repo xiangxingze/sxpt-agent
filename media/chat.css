@@ -40,6 +40,27 @@ body {
   cursor: pointer;
 }
 
+.mode {
+  flex: none;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  padding: 3px 7px;
+  border-radius: 3px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  cursor: pointer;
+}
+
+.mode[data-mode='readOnly'] {
+  color: var(--vscode-testing-iconPassed, #3fa34d);
+}
+
+.mode[data-mode='autoEdit'] {
+  color: var(--vscode-editorWarning-foreground, #d29922);
+}
+
 .bar-actions {
   display: flex;
   gap: 2px;
@@ -318,4 +339,185 @@ button.secondary {
 .cursor-blink::after {
   content: '▌';
   opacity: 0.6;
+}
+
+/* ---------- Agent 工具调用、计划、审批 ---------- */
+
+.tool {
+  padding: 4px 8px;
+  border-left: 2px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.tool.running {
+  border-left-color: var(--vscode-progressBar-background, #0e70c0);
+}
+
+.tool.ok {
+  border-left-color: var(--vscode-testing-iconPassed, #3fa34d);
+}
+
+.tool.fail {
+  border-left-color: var(--vscode-errorForeground, #f14c4c);
+}
+
+.tool-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.tool-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--vscode-editor-font-family);
+  color: var(--vscode-foreground);
+}
+
+.tool-state {
+  flex: none;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool.fail .tool-state {
+  color: var(--vscode-errorForeground, #f14c4c);
+}
+
+.tool-out summary {
+  cursor: pointer;
+  margin-top: 3px;
+  color: var(--vscode-textLink-foreground);
+}
+
+.tool-out pre,
+.ap-cmd {
+  margin: 4px 0 0;
+  padding: 6px;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  border-radius: 3px;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 11px;
+  background: var(--vscode-textCodeBlock-background, rgba(0, 0, 0, 0.15));
+  color: var(--vscode-foreground);
+}
+
+.plan {
+  padding: 6px 8px;
+  border-radius: 5px;
+  background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.08));
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+}
+
+.plan-title {
+  font-size: 11px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.plan-step {
+  display: flex;
+  gap: 6px;
+  line-height: 1.6;
+}
+
+.plan-step.completed {
+  color: var(--vscode-descriptionForeground);
+  text-decoration: line-through;
+}
+
+.plan-step.in_progress {
+  color: var(--vscode-textLink-foreground);
+  font-weight: 600;
+}
+
+.approval,
+.changes {
+  padding: 8px 10px;
+  border-radius: 5px;
+  border: 1px solid var(--vscode-editorWarning-foreground, #d29922);
+  background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.08));
+}
+
+.changes {
+  border-color: var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+}
+
+.approval.decided {
+  border-color: var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  opacity: 0.8;
+}
+
+.ap-title {
+  font-weight: 600;
+}
+
+.ap-stat {
+  margin-left: 8px;
+  font-weight: normal;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.ap-cwd {
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.ap-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.ap-actions button.primary,
+.ap-actions button.secondary {
+  padding: 3px 12px;
+}
+
+.ap-actions button.link {
+  border: none;
+  background: transparent;
+  color: var(--vscode-textLink-foreground);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0;
+}
+
+.ap-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.ap-result.allow {
+  color: var(--vscode-testing-iconPassed, #3fa34d);
+}
+
+.ap-result.deny {
+  color: var(--vscode-errorForeground, #f14c4c);
+}
+
+.changes-list {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 11px;
+}
+
+.run-meta {
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+  padding: 0 2px;
 }

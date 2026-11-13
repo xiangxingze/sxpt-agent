@@ -1,20 +1,22 @@
 import * as vscode from 'vscode';
-import { readConfig, providerDefaults, CONFIG_SECTION, ProviderKind } from './config';
+import { readConfig, providerDefaults, CONFIG_SECTION, ProviderKind, APPROVAL_MODE_LABELS } from './config';
 import { SecretStore } from './secrets';
-import { testConnection } from './provider';
+import { testConnection } from './modelCheck';
 import { collectContext, contextToPrompt } from './contextCollector';
-import { PatchReviewService } from './patchReview';
+import { ChangeTracker } from './changeTracker';
+import { DiffPreview } from './diffPreview';
 import { ChatViewProvider } from './chatView';
 import { PlatformClient, courseContextToPrompt } from './platform/client';
 import { getProjectOutline, clearProjectCache } from './project/outline';
 import { isDangerous, isWhitelisted } from './tools/commandRunner';
-import { piSdkLoadError, probePiSdk } from './agent/piAdapter';
+import { piSdkLoadError, probePiSdk } from './agent/piAgent';
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel('PTN AI Coding Agent');
   const secrets = new SecretStore(context);
-  const patches = new PatchReviewService(output, context);
-  patches.register();
+  const tracker = new ChangeTracker(context, output);
+  const diffs = new DiffPreview();
+  diffs.register(context);
 
   const platform = new PlatformClient(secrets, output);
 
@@ -25,7 +27,8 @@ export function activate(context: vscode.ExtensionContext): void {
   const provider = new ChatViewProvider(
     context.extensionUri,
     secrets,
-    patches,
+    tracker,
+    diffs,
     platform,
     output,
     statusBar,
@@ -46,33 +49,25 @@ export function activate(context: vscode.ExtensionContext): void {
   register('ptnAgent.refactorSelection', () => provider.runQuickAction('refactor'));
   register('ptnAgent.generateTests', () => provider.runQuickAction('tests'));
   register('ptnAgent.analyzeProblem', () => provider.runQuickAction('problem'));
+  register('ptnAgent.fixProblems', () => provider.runQuickAction('fix'));
   register('ptnAgent.explainProject', () => provider.runQuickAction('project'));
   register('ptnAgent.newSession', () => provider.newSession());
   register('ptnAgent.clearSession', () => provider.newSession());
-  register('ptnAgent.undoLastPatch', () => patches.undoLast());
+  register('ptnAgent.undoLastPatch', async () => {
+    await tracker.undoLast();
+    await provider.pushState();
+  });
+  register('ptnAgent.pickMode', () => provider.pickApprovalMode());
   register('ptnAgent.runTests', () => provider.runTests());
   register('ptnAgent.runCommand', () => provider.promptRunCommand());
 
   register('ptnAgent.checkPi', async () => {
     const sdk = await probePiSdk();
-    const rpcCmd = vscode.workspace.getConfiguration(CONFIG_SECTION).get<string>('piCommand') || 'pi';
     const lines = [
-      sdk.ok ? `内置 Pi SDK：可用${sdk.version ? `（v${sdk.version}）` : ''}` : '内置 Pi SDK：不可用',
-      sdk.ok ? '' : `原因：${sdk.error ?? piSdkLoadError() ?? '未知'}`,
-      `RPC 可执行文件：${rpcCmd}（仅 piTransport=rpc 时需要）`
-    ].filter(Boolean);
-    const action = await vscode.window.showInformationMessage(
-      lines.join('\n'),
-      sdk.ok ? '切换到 Pi 基座' : '打开设置'
-    );
-    if (action === '切换到 Pi 基座') {
-      await vscode.workspace
-        .getConfiguration(CONFIG_SECTION)
-        .update('agentBackend', 'pi', vscode.ConfigurationTarget.Global);
-      await provider.pushState();
-    } else if (action === '打开设置') {
-      await vscode.commands.executeCommand('ptnAgent.settings');
-    }
+      sdk.ok ? `Agent 运行环境：正常${sdk.version ? `（Pi SDK v${sdk.version}）` : ''}` : 'Agent 运行环境：不可用',
+      sdk.ok ? `Node.js：${process.version}` : `原因：${sdk.error ?? piSdkLoadError() ?? '未知'}`
+    ];
+    void vscode.window.showInformationMessage(lines.join('\n'));
   });
 
   context.subscriptions.push({
@@ -210,9 +205,9 @@ export function activate(context: vscode.ExtensionContext): void {
           action: 'allowList'
         },
         {
-          label: '$(chip) 切换 Agent 基座',
-          description: cfg.agentBackend === 'pi' ? 'Pi Agent' : '直连模型接口',
-          action: 'backend'
+          label: '$(shield) 审批模式',
+          description: APPROVAL_MODE_LABELS[cfg.approvalMode],
+          action: 'mode'
         },
         { label: '$(beaker) 测试连接', action: 'test' },
         { label: '$(gear) 打开完整设置', action: 'open' }
@@ -285,32 +280,9 @@ export function activate(context: vscode.ExtensionContext): void {
       case 'test':
         await vscode.commands.executeCommand('ptnAgent.testConnection');
         break;
-      case 'backend': {
-        const chosen = await vscode.window.showQuickPick(
-          [
-            { label: '直连模型接口（无额外依赖）', value: 'native' },
-            { label: 'Pi Agent 基座（可调用只读工具）', value: 'pi' }
-          ],
-          { title: '选择 Agent 基座' }
-        );
-        if (!chosen) {
-          return;
-        }
-        await config.update('agentBackend', chosen.value, target);
-        if (chosen.value === 'pi') {
-          const probe = await probePiSdk();
-          if (!probe.ok) {
-            void vscode.window.showWarningMessage(
-              `内置 Pi SDK 不可用：${probe.error ?? '未知原因'}。可改用 piTransport=rpc。`
-            );
-          } else {
-            void vscode.window.showInformationMessage(
-              `已切换到 Pi 基座${probe.version ? `（Pi v${probe.version}）` : ''}。`
-            );
-          }
-        }
+      case 'mode':
+        await provider.pickApprovalMode();
         break;
-      }
       case 'platformUrl': {
         const value = await vscode.window.showInputBox({
           title: '实训平台地址',

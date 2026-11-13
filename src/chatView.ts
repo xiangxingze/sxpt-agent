@@ -1,77 +1,224 @@
 import * as vscode from 'vscode';
-import { readConfig, readPiSettings, AgentBackend } from './config';
+import * as path from 'path';
+import { readConfig, AgentConfig, ApprovalMode, APPROVAL_MODE_LABELS } from './config';
 import { SecretStore } from './secrets';
 import { collectContext, contextToPrompt } from './contextCollector';
-import { buildSystemPrompt } from './prompts';
-import { parsePatches, parseNewFiles, parseRunCommands, stripPatchBlocks } from './patch';
-import { PatchReviewService } from './patchReview';
 import { getChatHtml } from './webviewHtml';
-import { NativeAdapter, toFriendlyError } from './agent/nativeAdapter';
-import { PiAdapter } from './agent/piAdapter';
-import { AgentAdapter, AgentMessage } from './agent/types';
+import { PiAgent } from './agent/piAgent';
 import { SessionStore } from './agent/session';
+import {
+  AgentHost,
+  AgentSettings,
+  ApprovalDecision,
+  ApprovalRequest
+} from './agent/types';
+import { toFriendlyError } from './modelCheck';
+import { ChangeTracker } from './changeTracker';
+import { DiffPreview } from './diffPreview';
 import { PlatformClient, CourseContext, courseContextToPrompt } from './platform/client';
 import { getProjectOutline } from './project/outline';
-import {
-  runCommand,
-  isDangerous,
-  isWhitelisted,
-  detectTestCommand
-} from './tools/commandRunner';
+import { runCommand, isDangerous, isWhitelisted, detectTestCommand } from './tools/commandRunner';
 
-export type QuickAction = 'explain' | 'problem' | 'tests' | 'project' | 'refactor' | 'runTests';
+export type QuickAction = 'explain' | 'problem' | 'fix' | 'tests' | 'project' | 'refactor' | 'runTests';
 
 const QUICK_PROMPTS: Record<Exclude<QuickAction, 'runTests'>, { prompt: string; needsSelection?: boolean }> = {
   explain: {
-    prompt: '解释我当前选中的代码：它做什么、执行流程是什么、涉及哪些关键知识点。',
+    prompt: '解释我当前选中的代码：它做什么、执行流程是什么、涉及哪些关键知识点。只讲解，不要修改文件。',
     needsSelection: true
   },
   problem: {
-    prompt: '分析当前文件中的错误和警告，说明原因，并给出可执行的修复建议。'
+    prompt: '用 get_diagnostics 查看当前的错误和警告，说明每个问题的原因。先只分析，不要修改文件。'
+  },
+  fix: {
+    prompt:
+      '检查当前工作区的错误和警告（get_diagnostics）；如果项目有测试或构建命令，运行它们。' +
+      '然后定位根因并修复，修复后重新验证，最后总结改了什么、为什么。'
   },
   tests: {
-    prompt: '为当前选中的代码生成单元测试，使用项目已有的测试框架风格，并说明如何运行。',
+    prompt:
+      '为我当前选中的代码编写单元测试：先看项目里已有的测试框架和风格，把测试写到合适的位置，' +
+      '再运行测试确认通过，最后说明如何运行。',
     needsSelection: true
   },
   project: {
-    prompt: '概述当前项目的目录结构和主要模块职责，指出入口文件和核心依赖。'
+    prompt: '概述当前项目的目录结构和主要模块职责，指出入口文件和核心依赖。只查看，不要修改文件。'
   },
   refactor: {
-    prompt: '分析当前选中的代码，指出可读性、结构和健壮性问题，给出重构方案。',
+    prompt:
+      '分析我当前选中的代码，指出可读性、结构和健壮性问题。给出重构方案，并先说明思路；' +
+      '然后用 edit 工具做出修改，改完检查诊断并总结。',
     needsSelection: true
   }
 };
 
 const PROJECT_INTENT = /项目|结构|架构|目录|模块|入口|依赖|技术栈|工程|仓库|代码库/i;
 
+interface PendingApproval {
+  request: ApprovalRequest;
+  finish: (decision: ApprovalDecision) => void;
+}
+
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'ptnAgent.chatView';
 
   private view?: vscode.WebviewView;
   private busy = false;
-  private cts?: vscode.CancellationTokenSource;
-  private readonly nativeAdapter: AgentAdapter = new NativeAdapter();
-  private piAdapter?: PiAdapter;
-  private currentApiKey?: string;
+  private abort?: AbortController;
+  private readonly agent: PiAgent;
   private readonly session: SessionStore;
-  /** 命令输出等临时上下文，随下一条消息附带一次后清空 */
+  /** 学生手动运行的命令输出，随下一条消息附带一次后清空 */
   private pendingContexts: string[] = [];
   private lastCourse?: CourseContext;
-
-  private readonly extensionStoragePath?: string;
+  private readonly pendingApprovals = new Map<string, PendingApproval>();
 
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly secrets: SecretStore,
-    private readonly patches: PatchReviewService,
+    private readonly tracker: ChangeTracker,
+    private readonly diffs: DiffPreview,
     private readonly platform: PlatformClient,
     private readonly output: vscode.OutputChannel,
     private readonly statusBar: vscode.StatusBarItem,
     context: vscode.ExtensionContext
   ) {
     this.session = new SessionStore(context);
-    this.extensionStoragePath = context.globalStorageUri?.fsPath;
+    this.agent = new PiAgent(this.createHost(), (line) => this.output.appendLine(line), context.globalStorageUri?.fsPath);
   }
+
+  // ---------------- Agent 宿主能力 ----------------
+
+  private createHost(): AgentHost {
+    return {
+      requestApproval: (request, signal) => this.requestApproval(request, signal),
+      beforeWrite: (absPath) => this.tracker.snapshot(absPath),
+      isDirty: (absPath) => this.isDirty(absPath),
+      getDiagnostics: (p) => this.collectDiagnostics(p),
+      onPlan: (steps) => this.post({ type: 'plan', steps })
+    };
+  }
+
+  private isDirty(absPath: string): boolean {
+    const target = normalizeFsPath(absPath);
+    return vscode.workspace.textDocuments.some(
+      (doc) => doc.uri.scheme === 'file' && doc.isDirty && normalizeFsPath(doc.uri.fsPath) === target
+    );
+  }
+
+  private async collectDiagnostics(p: string | undefined): Promise<string> {
+    const roots = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
+    if (roots.length === 0) {
+      return '当前没有打开工作区。';
+    }
+    const filterPath = p && p.trim() ? path.resolve(roots[0], p.trim().replace(/^@/, '')) : undefined;
+    const lines: string[] = [];
+    let total = 0;
+    for (const [uri, diags] of vscode.languages.getDiagnostics()) {
+      if (uri.scheme !== 'file') {
+        continue;
+      }
+      const fsPath = uri.fsPath;
+      if (!roots.some((r) => normalizeFsPath(fsPath).startsWith(normalizeFsPath(r)))) {
+        continue;
+      }
+      if (filterPath && normalizeFsPath(fsPath) !== normalizeFsPath(filterPath)) {
+        continue;
+      }
+      const rel = vscode.workspace.asRelativePath(uri, false);
+      for (const d of diags) {
+        if (d.severity > vscode.DiagnosticSeverity.Warning) {
+          continue;
+        }
+        total++;
+        if (lines.length < 60) {
+          const label = d.severity === vscode.DiagnosticSeverity.Error ? 'error' : 'warning';
+          const source = d.source ? ` (${d.source})` : '';
+          lines.push(`${rel}:${d.range.start.line + 1}:${d.range.start.character + 1} [${label}] ${d.message.split('\n')[0]}${source}`);
+        }
+      }
+    }
+    if (total === 0) {
+      return '没有错误或警告。（仅包含语言服务已分析的文件，未打开过的文件可能不在其中。）';
+    }
+    const more = total > lines.length ? `\n……另有 ${total - lines.length} 条未显示` : '';
+    return `共 ${total} 条错误/警告：\n${lines.join('\n')}${more}`;
+  }
+
+  // ---------------- 审批 ----------------
+
+  private requestApproval(request: ApprovalRequest, signal: AbortSignal): Promise<ApprovalDecision> {
+    return new Promise<ApprovalDecision>((resolve) => {
+      let settled = false;
+      const finish = (decision: ApprovalDecision) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        this.pendingApprovals.delete(request.id);
+        signal.removeEventListener('abort', onAbort);
+        this.post({ type: 'approvalDone', id: request.id, decision });
+        void this.diffs.close(request.id);
+        resolve(decision);
+      };
+      const onAbort = () => finish('deny');
+      if (signal.aborted) {
+        finish('deny');
+        return;
+      }
+      signal.addEventListener('abort', onAbort);
+      this.pendingApprovals.set(request.id, { request, finish });
+
+      if (this.view?.visible) {
+        this.post({
+          type: 'approval',
+          request: {
+            id: request.id,
+            kind: request.kind,
+            title: request.title,
+            relPath: request.relPath,
+            command: request.command,
+            cwd: request.cwd,
+            isNewFile: request.isNewFile,
+            added: request.added,
+            removed: request.removed,
+            canDiff: request.kind !== 'bash'
+          }
+        });
+        if (request.kind !== 'bash') {
+          void this.diffs.show(request).catch((err) => this.output.appendLine(`[diff] ${(err as Error).message}`));
+        }
+      } else {
+        // 侧栏不可见时改用原生弹窗，避免 Agent 卡在等待审批
+        void this.nativeApproval(request).then(finish);
+      }
+    });
+  }
+
+  private async nativeApproval(request: ApprovalRequest): Promise<ApprovalDecision> {
+    if (request.kind !== 'bash') {
+      void this.diffs.show(request).catch(() => undefined);
+    }
+    const detail =
+      request.kind === 'bash'
+        ? `命令：${request.command}\n工作目录：${request.cwd}`
+        : `${request.title}（+${request.added ?? 0} −${request.removed ?? 0}）`;
+    const buttons = request.kind === 'bash' ? ['允许'] : ['允许', '本次会话全部允许'];
+    const choice = await vscode.window.showWarningMessage(`Agent 请求：${detail}`, { modal: true }, ...buttons);
+    if (choice === '允许') {
+      return 'allow';
+    }
+    if (choice === '本次会话全部允许') {
+      return 'allowAllEdits';
+    }
+    return 'deny';
+  }
+
+  private cancelPendingApprovals(): void {
+    for (const pending of [...this.pendingApprovals.values()]) {
+      pending.finish('deny');
+    }
+  }
+
+  // ---------------- 视图 ----------------
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
@@ -86,6 +233,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         void this.refreshContext();
       }
     });
+    view.onDidDispose(() => {
+      if (this.view === view) {
+        this.view = undefined;
+      }
+    });
   }
 
   async reveal(): Promise<void> {
@@ -93,9 +245,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   async newSession(): Promise<void> {
-    const backend = readConfig().agentBackend;
+    this.abort?.abort();
+    this.cancelPendingApprovals();
     try {
-      await this.selectAdapter(backend).reset?.();
+      await this.agent.reset();
     } catch {
       // 重置失败不阻塞 UI
     }
@@ -106,25 +259,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     await this.pushState();
   }
 
-  /** 根据配置选择 Agent 基座；Pi 适配器惰性创建并复用同一个进程/会话 */
-  private selectAdapter(backend: AgentBackend): AgentAdapter {
-    if (backend !== 'pi') {
-      return this.nativeAdapter;
-    }
-    if (!this.piAdapter) {
-      const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-      this.piAdapter = new PiAdapter(
-        () => ({ ...readPiSettings(cwd), apiKey: this.currentApiKey }),
-        this.output,
-        this.extensionStoragePath
-      );
-    }
-    return this.piAdapter;
-  }
-
   dispose(): void {
-    this.nativeAdapter.dispose();
-    this.piAdapter?.dispose();
+    this.abort?.abort();
+    this.cancelPendingApprovals();
+    this.agent.dispose();
   }
 
   private post(message: unknown): void {
@@ -144,7 +282,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await this.handleUserText(String(msg.text ?? ''));
         break;
       case 'stop':
-        this.cts?.cancel();
+        this.abort?.abort();
         break;
       case 'newSession':
       case 'clearSession':
@@ -152,6 +290,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         break;
       case 'openSettings':
         await vscode.commands.executeCommand('ptnAgent.settings');
+        break;
+      case 'pickMode':
+        await this.pickApprovalMode();
         break;
       case 'showContext':
         await vscode.commands.executeCommand('ptnAgent.showContext');
@@ -162,9 +303,57 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case 'refreshPlatform':
         await vscode.commands.executeCommand('ptnAgent.refreshPlatform');
         break;
+      case 'approvalResponse':
+        this.pendingApprovals.get(String(msg.id))?.finish(
+          msg.decision === 'allow' || msg.decision === 'allowAllEdits' ? msg.decision : 'deny'
+        );
+        break;
+      case 'openDiff': {
+        const pending = this.pendingApprovals.get(String(msg.id));
+        if (pending) {
+          await this.diffs.show(pending.request);
+        }
+        break;
+      }
+      case 'undo':
+        await this.tracker.undoLast();
+        await this.pushState();
+        break;
       default:
         break;
     }
+  }
+
+  async pickApprovalMode(): Promise<void> {
+    const current = readConfig().approvalMode;
+    const items: Array<vscode.QuickPickItem & { value: ApprovalMode }> = [
+      {
+        label: '逐项确认',
+        description: current === 'ask' ? '当前' : '',
+        detail: '每次修改文件、运行命令都先让你确认（推荐）',
+        value: 'ask'
+      },
+      {
+        label: '自动应用修改',
+        description: current === 'autoEdit' ? '当前' : '',
+        detail: '工作区内的文件修改直接应用，可一键撤销；运行命令仍需确认',
+        value: 'autoEdit'
+      },
+      {
+        label: '只读',
+        description: current === 'readOnly' ? '当前' : '',
+        detail: 'Agent 只能查看代码和诊断，不能修改文件或运行命令',
+        value: 'readOnly'
+      }
+    ];
+    const picked = await vscode.window.showQuickPick(items, { title: 'Agent 审批模式' });
+    if (!picked) {
+      return;
+    }
+    await vscode.workspace
+      .getConfiguration('ptnAgent')
+      .update('approvalMode', picked.value, vscode.ConfigurationTarget.Global);
+    await this.pushState();
   }
 
   async pushState(): Promise<void> {
@@ -174,13 +363,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       type: 'state',
       model: cfg.model,
       provider: cfg.provider,
-      backend: cfg.agentBackend,
-      backendLabel: cfg.agentBackend === 'pi' ? 'Pi Agent' : '直连模型',
+      mode: cfg.approvalMode,
+      modeLabel: APPROVAL_MODE_LABELS[cfg.approvalMode] + (this.agent.autoEditsEnabled ? ' · 本次会话自动允许修改' : ''),
       busy: this.busy,
       contextLabel: label,
       contextWarn: label.indexOf('未打开') >= 0,
       sessionCount: this.session.count,
-      undoCount: this.patches.undoCount,
+      undoCount: this.tracker.undoCount,
       platformStatus: this.platformStatusText(cfg.platformUrl)
     });
     this.updateStatusBar();
@@ -200,13 +389,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private updateStatusBar(): void {
     const cfg = readConfig();
-    const suffix = cfg.agentBackend === 'pi' ? ' · Pi' : '';
     this.statusBar.text = this.busy
-      ? `$(sync~spin) ${cfg.model}${suffix}`
-      : `$(comment-discussion) ${cfg.model}${suffix}`;
-    this.statusBar.tooltip = `PTN AI Coding Agent · ${
-      cfg.agentBackend === 'pi' ? 'Pi 基座' : '直连模型'
-    } · ${cfg.provider} · ${cfg.baseUrl}`;
+      ? `$(sync~spin) ${cfg.model}`
+      : `$(comment-discussion) ${cfg.model}`;
+    this.statusBar.tooltip = `PTN AI Coding Agent · ${APPROVAL_MODE_LABELS[cfg.approvalMode]} · ${cfg.provider} · ${cfg.baseUrl}`;
     this.statusBar.show();
   }
 
@@ -248,6 +434,30 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     await this.handleUserText(item.prompt, action === 'project');
   }
 
+  // ---------------- 一次 Agent 任务 ----------------
+
+  private buildSettings(cfg: AgentConfig, apiKey: string | undefined): AgentSettings | undefined {
+    const roots = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
+    if (roots.length === 0) {
+      return undefined;
+    }
+    return {
+      provider: cfg.provider,
+      baseUrl: cfg.baseUrl,
+      model: cfg.model,
+      apiKey,
+      cwd: roots[0],
+      roots,
+      approvalMode: cfg.approvalMode,
+      allowedCommands: cfg.allowedCommands,
+      commandTimeoutMs: cfg.commandTimeoutMs,
+      runTimeoutMs: cfg.runTimeoutMs,
+      contextWindow: cfg.contextWindow,
+      maxOutputTokens: cfg.maxOutputTokens,
+      systemPromptExtra: cfg.systemPromptExtra
+    };
+  }
+
   async handleUserText(text: string, forceProjectContext = false): Promise<void> {
     const trimmed = text.trim();
     if (!trimmed || this.busy) {
@@ -256,88 +466,98 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     const cfg = readConfig();
     const apiKey = await this.secrets.getApiKey();
-    if (cfg.provider !== 'ollama' && !apiKey && cfg.agentBackend !== 'pi') {
-      const set = await vscode.window.showWarningMessage(
-        '尚未配置 API Key，无法调用模型。',
-        '去配置'
-      );
+    if (cfg.provider !== 'ollama' && !apiKey) {
+      const set = await vscode.window.showWarningMessage('尚未配置 API Key，无法调用模型。', '去配置');
       if (set === '去配置') {
         await vscode.commands.executeCommand('ptnAgent.settings');
       }
       return;
     }
-    this.currentApiKey = apiKey;
+    const settings = this.buildSettings(cfg, apiKey);
+    if (!settings) {
+      const open = await vscode.window.showWarningMessage(
+        'Agent 需要在一个工作区文件夹中工作。请先打开一个文件夹。',
+        '打开文件夹'
+      );
+      if (open === '打开文件夹') {
+        await vscode.commands.executeCommand('workbench.action.files.openFolder');
+      }
+      return;
+    }
 
     this.busy = true;
     this.updateStatusBar();
     this.post({ type: 'user', text: trimmed });
-    this.post({
-      type: 'state',
-      model: cfg.model,
-      provider: cfg.provider,
-      backend: cfg.agentBackend,
-      busy: true
-    });
+    this.post({ type: 'state', model: cfg.model, provider: cfg.provider, busy: true });
+
+    this.tracker.beginRun();
+    const controller = new AbortController();
+    this.abort = controller;
+    const id = `a${Date.now()}`;
+    let changedFiles: string[] = [];
 
     try {
       const contextBlock = await this.buildContextBlock(cfg, trimmed, forceProjectContext);
-      const userContent = contextBlock ? `${contextBlock}\n\n【我的问题】\n${trimmed}` : trimmed;
+      const prompt = contextBlock ? `${contextBlock}\n\n【我的请求】\n${trimmed}` : trimmed;
 
-      const messages: AgentMessage[] = [
-        { role: 'system', content: buildSystemPrompt(cfg) },
-        ...this.session.all,
-        { role: 'user', content: userContent }
-      ];
-
-      const id = `a${Date.now()}`;
       this.post({ type: 'assistantStart', id });
-
-      this.cts = new vscode.CancellationTokenSource();
-      let full = '';
       try {
-        const adapter = this.selectAdapter(cfg.agentBackend);
-        this.post({ type: 'info', message: `${adapter.label} 运行中…` });
-        const result = await adapter.run(
-          { messages, config: cfg, apiKey },
+        const result = await this.agent.run(
+          { prompt, history: this.session.all, settings, signal: controller.signal },
           {
-            onDelta: (delta) => this.post({ type: 'assistantDelta', id, text: delta }),
+            onTextDelta: (delta) => this.post({ type: 'textDelta', text: delta }),
+            onTextReset: () => this.post({ type: 'textReset' }),
+            onToolStart: (info) => this.post({ type: 'toolStart', ...info }),
+            onToolEnd: (info) => this.post({ type: 'toolEnd', ...info }),
             onStatus: (status) => this.post({ type: 'info', message: status })
-          },
-          this.cts.token
+          }
         );
-        full = result.text;
 
-        this.session.addUser(userContent);
-        this.session.addAssistant(full);
+        changedFiles = this.tracker.commitRun();
+        const changeNote =
+          changedFiles.length > 0
+            ? `\n\n（本次修改了：${changedFiles.map((f) => this.rel(f)).join('、')}）`
+            : '';
+        this.session.addUser(trimmed);
+        this.session.addAssistant((result.text || '（已完成操作）') + changeNote);
 
-        const display = stripPatchBlocks(full);
+        const seconds = (result.elapsedMs / 1000).toFixed(1);
         this.post({
           type: 'assistantEnd',
           id,
-          text: display || '（已生成代码修改或命令建议）',
-          meta: `${result.model} · ${(result.elapsedMs / 1000).toFixed(1)}s`
+          aborted: result.aborted,
+          meta: `${result.model} · ${seconds}s${result.toolCalls ? ` · ${result.toolCalls} 次工具调用` : ''}${result.aborted ? ' · 已停止' : ''}`
         });
-
-        await this.handleProposals(full, cfg);
       } catch (err) {
-        this.post({ type: 'error', message: toFriendlyError(err) });
-        this.output.appendLine(`[agent] ${toFriendlyError(err)}`);
-      } finally {
-        this.cts?.dispose();
-        this.cts = undefined;
+        changedFiles = this.tracker.commitRun();
+        const friendly = toFriendlyError(err);
+        this.post({ type: 'assistantEnd', id, aborted: true, meta: '' });
+        this.post({ type: 'error', message: friendly });
+        this.output.appendLine(`[agent] ${friendly}`);
+      }
+
+      if (changedFiles.length > 0) {
+        this.post({
+          type: 'changes',
+          files: changedFiles.map((f) => this.rel(f))
+        });
       }
     } finally {
+      // 出现异常路径时保证批次被收尾，避免快照泄漏到下一次任务
+      this.tracker.commitRun();
+      this.cancelPendingApprovals();
+      this.abort = undefined;
       this.busy = false;
       this.updateStatusBar();
       await this.pushState();
     }
   }
 
-  private async buildContextBlock(
-    cfg: ReturnType<typeof readConfig>,
-    question: string,
-    forceProject: boolean
-  ): Promise<string> {
+  private rel(absPath: string): string {
+    return vscode.workspace.asRelativePath(vscode.Uri.file(absPath), false);
+  }
+
+  private async buildContextBlock(cfg: AgentConfig, question: string, forceProject: boolean): Promise<string> {
     const blocks: string[] = [];
 
     if (cfg.platformUrl) {
@@ -379,28 +599,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     return blocks.join('\n\n');
   }
 
-  private async handleProposals(answer: string, cfg: ReturnType<typeof readConfig>): Promise<void> {
-    const patches = parsePatches(answer);
-    const newFiles = parseNewFiles(answer);
-    const commands = parseRunCommands(answer);
+  // ---------------- 学生手动运行命令（独立于 Agent） ----------------
 
-    if (patches.length > 0 || newFiles.length > 0) {
-      const summary = await this.patches.reviewBatch(patches, newFiles, {
-        requireApproval: cfg.requireDiffApproval
-      });
-      this.notify(
-        `修改处理完成：应用 ${summary.applied}，跳过 ${summary.skipped}，失败 ${summary.failed}。` +
-          (summary.applied > 0 ? ' 可用命令「撤销上次 AI 修改」回退。' : ''),
-        summary.failed > 0 ? 'warn' : 'info'
-      );
-    }
-
-    for (const command of commands) {
-      await this.confirmAndRun(command, cfg);
-    }
-  }
-
-  private async confirmAndRun(command: string, cfg: ReturnType<typeof readConfig>): Promise<void> {
+  private async confirmAndRun(command: string, cfg: AgentConfig): Promise<void> {
     const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (!root) {
       this.notify('未打开工作区，无法执行命令。', 'warn');
@@ -413,7 +614,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     const trusted = isWhitelisted(command, cfg.allowedCommands);
     const choice = await vscode.window.showWarningMessage(
-      `Agent 请求执行命令：\n\n${command}\n\n工作目录：${root}`,
+      `即将执行命令：\n\n${command}\n\n工作目录：${root}`,
       { modal: true },
       '执行',
       '取消'
@@ -427,22 +628,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const result = await runCommand(command, root, cfg.commandTimeoutMs);
     const outputTail = result.output.slice(-3000);
     this.notify(
-      `命令${result.ok ? '完成' : '失败'}（退出码 ${result.exitCode}，${(
-        result.durationMs / 1000
-      ).toFixed(1)}s）\n\n${outputTail}`,
+      `命令${result.ok ? '完成' : '失败'}（退出码 ${result.exitCode}，${(result.durationMs / 1000).toFixed(1)}s）\n\n${outputTail}`,
       result.ok ? 'info' : 'warn'
     );
     this.output.appendLine(`[cmd] ${command} -> ${result.exitCode}`);
 
     this.pendingContexts.push(
-      [
-        `【上一次命令输出】`,
-        `命令：${command}`,
-        `退出码：${result.exitCode}`,
-        '```',
-        outputTail,
-        '```'
-      ].join('\n')
+      [`【上一次命令输出】`, `命令：${command}`, `退出码：${result.exitCode}`, '```', outputTail, '```'].join('\n')
     );
   }
 
@@ -450,9 +642,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const outline = await getProjectOutline();
     const candidates = detectTestCommand(outline?.techStack ?? []);
     if (candidates.length === 0) {
-      void vscode.window.showInformationMessage(
-        '未识别到可用的测试命令，请手动指定（命令面板：AI Agent: 运行命令）。'
-      );
+      void vscode.window.showInformationMessage('未识别到可用的测试命令，请手动指定（命令面板：AI Agent: 运行命令）。');
       return;
     }
     const picked = await vscode.window.showQuickPick(
@@ -485,4 +675,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   get sessionMessageCount(): number {
     return this.session.count;
   }
+}
+
+function normalizeFsPath(p: string): string {
+  const resolved = path.resolve(p);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }

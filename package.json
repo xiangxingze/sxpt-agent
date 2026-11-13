@@ -1,8 +1,8 @@
 {
   "name": "ptn-agent",
   "displayName": "PTN AI Coding Agent",
-  "description": "实训平台内置 VS Code 的 AI 编程学习与开发助手：代码理解、调试分析、修改预览、自定义模型。",
-  "version": "0.1.0",
+  "description": "实训平台内置 VS Code 的 AI 编程 Agent：自主查看代码、修改文件、运行命令并验证，所有修改经 Diff 审核、可一键撤销。",
+  "version": "0.2.0",
   "publisher": "ptn",
   "license": "MIT",
   "engines": {
@@ -56,6 +56,10 @@
       {
         "command": "ptnAgent.analyzeProblem",
         "title": "AI Agent: 分析当前错误"
+      },
+      {
+        "command": "ptnAgent.fixProblems",
+        "title": "AI Agent: 修复当前问题"
       },
       {
         "command": "ptnAgent.generateTests",
@@ -119,7 +123,11 @@
       },
       {
         "command": "ptnAgent.checkPi",
-        "title": "AI Agent: 检查 Pi 基座"
+        "title": "AI Agent: 检查 Agent 运行环境"
+      },
+      {
+        "command": "ptnAgent.pickMode",
+        "title": "AI Agent: 切换审批模式"
       }
     ],
     "menus": {
@@ -144,8 +152,12 @@
           "group": "ptnAgent@4"
         },
         {
-          "command": "ptnAgent.gotoProblem",
+          "command": "ptnAgent.fixProblems",
           "group": "ptnAgent@5"
+        },
+        {
+          "command": "ptnAgent.gotoProblem",
+          "group": "ptnAgent@6"
         }
       ],
       "commandPalette": [
@@ -171,41 +183,20 @@
     "configuration": {
       "title": "PTN AI Coding Agent",
       "properties": {
-        "ptnAgent.agentBackend": {
+        "ptnAgent.approvalMode": {
           "type": "string",
-          "enum": ["native", "pi"],
-          "enumDescriptions": [
-            "直连模型接口（内置，无额外依赖）",
-            "Pi Agent 基座（内置 SDK，可调用只读工具）"
+          "enum": [
+            "ask",
+            "autoEdit",
+            "readOnly"
           ],
-          "default": "native",
-          "description": "Agent 基座"
-        },
-        "ptnAgent.piTransport": {
-          "type": "string",
-          "enum": ["sdk", "rpc"],
           "enumDescriptions": [
-            "进程内 SDK（随扩展内置，推荐）",
-            "启动 pi --mode rpc 子进程"
+            "每次修改文件、运行命令都需要确认（推荐）",
+            "工作区内的文件修改自动应用（可一键撤销），运行命令仍需确认",
+            "只读：Agent 只能查看代码和诊断，不能修改文件或运行命令"
           ],
-          "default": "sdk",
-          "description": "Pi 接入方式，仅在 agentBackend=pi 时生效"
-        },
-        "ptnAgent.piCommand": {
-          "type": "string",
-          "default": "pi",
-          "description": "Pi 可执行文件路径，仅在 piTransport=rpc 时使用"
-        },
-        "ptnAgent.piExtraArgs": {
-          "type": "array",
-          "items": { "type": "string" },
-          "default": [],
-          "description": "追加给 Pi RPC 进程的额外参数"
-        },
-        "ptnAgent.piTimeoutMs": {
-          "type": "number",
-          "default": 180000,
-          "description": "Pi 单次运行超时时间（毫秒）"
+          "default": "ask",
+          "description": "Agent 审批模式"
         },
         "ptnAgent.provider": {
           "type": "string",
@@ -232,12 +223,20 @@
           "default": "deepseek-chat",
           "description": "模型名称"
         },
-        "ptnAgent.temperature": {
+        "ptnAgent.contextWindow": {
           "type": "number",
-          "default": 0.2,
-          "minimum": 0,
-          "maximum": 2,
-          "description": "采样温度"
+          "default": 128000,
+          "description": "模型上下文窗口大小（token）。Agent 会据此自动压缩过长的对话，请按所用模型实际能力填写"
+        },
+        "ptnAgent.maxOutputTokens": {
+          "type": "number",
+          "default": 8192,
+          "description": "单次回复的最大输出 token 数"
+        },
+        "ptnAgent.runTimeoutMs": {
+          "type": "number",
+          "default": 600000,
+          "description": "Agent 单次任务的最长运行时间（毫秒），超时自动停止"
         },
         "ptnAgent.maxContextLines": {
           "type": "number",
@@ -248,11 +247,6 @@
           "type": "boolean",
           "default": true,
           "description": "自动附带当前文件与选区上下文"
-        },
-        "ptnAgent.requireDiffApproval": {
-          "type": "boolean",
-          "default": true,
-          "description": "代码修改必须经过 Diff 审核后才会写入"
         },
         "ptnAgent.platformUrl": {
           "type": "string",
@@ -275,12 +269,12 @@
             "type": "string"
           },
           "default": [],
-          "description": "命令白名单前缀，例如 npm test、dotnet build。白名单不会跳过硬性确认"
+          "description": "Agent 可免确认执行的命令前缀，例如 npm test、dotnet build。含管道、&&、; 等 shell 元字符的命令仍需确认；高危命令一律拦截"
         },
         "ptnAgent.commandTimeoutMs": {
           "type": "number",
           "default": 120000,
-          "description": "命令执行超时时间（毫秒）"
+          "description": "单条命令的最长执行时间（毫秒）"
         }
       }
     }
@@ -288,9 +282,9 @@
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package --no-dependencies",
+    "package": "vsce package",
     "lint": "tsc --noEmit -p ./",
-    "check": "node scripts/check-patch.js && node scripts/check-patch-resolve.js && node scripts/check-commands.js && node scripts/check-session.js && node scripts/check-platform.js && node scripts/check-undo.js && node scripts/check-stream.js && node scripts/check-pi-sdk.js && node scripts/check-pi-rpc.js && node scripts/check-pi-custom-provider.js && node scripts/smoke.js"
+    "check": "node scripts/check-policy.js && node scripts/check-commands.js && node scripts/check-session.js && node scripts/check-platform.js && node scripts/check-undo.js && node scripts/check-pi-custom-provider.js && node scripts/check-agent.js && node scripts/check-chat.js && node scripts/smoke.js"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

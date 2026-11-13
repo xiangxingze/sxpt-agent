@@ -1,35 +1,30 @@
 import * as vscode from 'vscode';
 
 export type ProviderKind = 'deepseek' | 'openai-compatible' | 'ollama';
-export type AgentBackend = 'native' | 'pi';
-export type PiTransport = 'sdk' | 'rpc';
+
+/**
+ * 审批模式：
+ * - ask：每次修改文件、执行命令都需要学生确认（默认）
+ * - autoEdit：工作区内的文件修改自动应用（可一键撤销），命令仍需确认
+ * - readOnly：只读，Agent 只能查看代码和诊断，不能修改文件或执行命令
+ */
+export type ApprovalMode = 'ask' | 'autoEdit' | 'readOnly';
 
 export interface AgentConfig {
   provider: ProviderKind;
-  agentBackend: AgentBackend;
   baseUrl: string;
   model: string;
-  temperature: number;
+  contextWindow: number;
+  maxOutputTokens: number;
   maxContextLines: number;
   autoContext: boolean;
-  requireDiffApproval: boolean;
+  approvalMode: ApprovalMode;
   platformUrl: string;
   systemPromptExtra: string;
   includeProjectContext: boolean;
   allowedCommands: string[];
   commandTimeoutMs: number;
-}
-
-export interface PiSettings {
-  provider: ProviderKind;
-  baseUrl: string;
-  transport: PiTransport;
-  model: string;
-  apiKey?: string;
-  cwd: string;
-  rpcCommand: string;
-  extraArgs: string[];
-  timeoutMs: number;
+  runTimeoutMs: number;
 }
 
 const PROVIDER_DEFAULTS: Record<ProviderKind, { baseUrl: string; model: string }> = {
@@ -38,24 +33,32 @@ const PROVIDER_DEFAULTS: Record<ProviderKind, { baseUrl: string; model: string }
   ollama: { baseUrl: 'http://127.0.0.1:11434/v1', model: 'qwen2.5-coder' }
 };
 
+export const APPROVAL_MODE_LABELS: Record<ApprovalMode, string> = {
+  ask: '逐项确认',
+  autoEdit: '自动应用修改',
+  readOnly: '只读'
+};
+
 export function readConfig(): AgentConfig {
   const cfg = vscode.workspace.getConfiguration('ptnAgent');
   const provider = (cfg.get<ProviderKind>('provider') ?? 'deepseek') as ProviderKind;
   const defaults = PROVIDER_DEFAULTS[provider];
+  const mode = cfg.get<ApprovalMode>('approvalMode');
   return {
     provider,
-    agentBackend: (cfg.get<AgentBackend>('agentBackend') ?? 'native') as AgentBackend,
     baseUrl: normalizeBaseUrl(cfg.get<string>('baseUrl') || defaults.baseUrl),
     model: cfg.get<string>('model') || defaults.model,
-    temperature: cfg.get<number>('temperature') ?? 0.2,
+    contextWindow: positive(cfg.get<number>('contextWindow'), 128_000),
+    maxOutputTokens: positive(cfg.get<number>('maxOutputTokens'), 8192),
     maxContextLines: cfg.get<number>('maxContextLines') ?? 400,
     autoContext: cfg.get<boolean>('autoContext') ?? true,
-    requireDiffApproval: cfg.get<boolean>('requireDiffApproval') ?? true,
+    approvalMode: mode === 'autoEdit' || mode === 'readOnly' ? mode : 'ask',
     platformUrl: (cfg.get<string>('platformUrl') || '').trim(),
     systemPromptExtra: cfg.get<string>('systemPromptExtra') || '',
     includeProjectContext: cfg.get<boolean>('includeProjectContext') ?? true,
     allowedCommands: (cfg.get<string[]>('allowedCommands') || []).filter((c) => c.trim().length > 0),
-    commandTimeoutMs: cfg.get<number>('commandTimeoutMs') ?? 120_000
+    commandTimeoutMs: positive(cfg.get<number>('commandTimeoutMs'), 120_000),
+    runTimeoutMs: positive(cfg.get<number>('runTimeoutMs'), 600_000)
   };
 }
 
@@ -63,23 +66,12 @@ export function providerDefaults(provider: ProviderKind) {
   return PROVIDER_DEFAULTS[provider];
 }
 
-export function readPiSettings(cwd: string): PiSettings {
-  const cfg = vscode.workspace.getConfiguration('ptnAgent');
-  const provider = (cfg.get<ProviderKind>('provider') ?? 'deepseek') as ProviderKind;
-  return {
-    provider,
-    baseUrl: normalizeBaseUrl(cfg.get<string>('baseUrl') || PROVIDER_DEFAULTS[provider].baseUrl),
-    transport: (cfg.get<PiTransport>('piTransport') ?? 'sdk') as PiTransport,
-    model: cfg.get<string>('model') || PROVIDER_DEFAULTS[provider].model,
-    cwd,
-    rpcCommand: (cfg.get<string>('piCommand') || 'pi').trim(),
-    extraArgs: (cfg.get<string[]>('piExtraArgs') || []).filter((a) => typeof a === 'string'),
-    timeoutMs: cfg.get<number>('piTimeoutMs') ?? 180_000
-  };
-}
-
 export function normalizeBaseUrl(url: string): string {
   return url.trim().replace(/\/+$/, '');
+}
+
+function positive(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
 export const CONFIG_SECTION = 'ptnAgent';

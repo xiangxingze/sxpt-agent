@@ -28,6 +28,7 @@ export function getChatHtml(webview: vscode.Webview, extensionUri: vscode.Uri): 
 <body>
   <header class="bar">
     <div class="model" id="modelChip" role="button" tabindex="0" title="模型设置">未配置模型</div>
+    <div class="mode" id="modeChip" role="button" tabindex="0" title="审批模式：控制 Agent 修改文件、运行命令前是否需要确认">逐项确认</div>
     <div class="bar-actions">
       <button class="icon" id="btnNew" title="新建会话">＋</button>
       <button class="icon" id="btnClear" title="清空会话">⌫</button>
@@ -50,11 +51,12 @@ export function getChatHtml(webview: vscode.Webview, extensionUri: vscode.Uri): 
   <main class="messages" id="messages">
     <div class="empty" id="emptyState">
       <p class="empty-title">AI Coding Agent</p>
-      <p class="empty-sub">选中代码后提问，或直接从下方快捷操作开始。</p>
+      <p class="empty-sub">告诉我你想做什么：解释代码、修复错误、补充测试、实现功能。我会自己查看代码、修改文件并运行验证。</p>
       <ul class="empty-list">
         <li><kbd>Ctrl+Alt+I</kbd> 打开对话</li>
         <li><kbd>Ctrl+Alt+E</kbd> 解释选中代码</li>
-        <li>代码修改会先打开 Diff，确认后写入</li>
+        <li>每次修改都会先打开 Diff，由你确认后才写入</li>
+        <li>改错了可以点「撤销本次修改」</li>
       </ul>
     </div>
   </main>
@@ -62,6 +64,7 @@ export function getChatHtml(webview: vscode.Webview, extensionUri: vscode.Uri): 
   <div class="quick" id="quick">
     <button data-action="explain">解释代码</button>
     <button data-action="problem">分析错误</button>
+    <button data-action="fix">修复问题</button>
     <button data-action="tests">生成测试</button>
     <button data-action="runTests">运行测试</button>
     <button data-action="project">项目结构</button>
@@ -69,7 +72,7 @@ export function getChatHtml(webview: vscode.Webview, extensionUri: vscode.Uri): 
   </div>
 
   <footer class="composer">
-    <textarea id="input" rows="3" placeholder="询问 AI Coding Agent…（Enter 发送，Shift+Enter 换行）"></textarea>
+    <textarea id="input" rows="3" placeholder="让 Agent 帮你理解、修改或调试代码…（Enter 发送，Shift+Enter 换行）"></textarea>
     <div class="composer-bar">
       <span class="hint" id="statusHint">就绪</span>
       <button class="primary" id="btnSend">发送</button>
