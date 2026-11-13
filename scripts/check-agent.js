@@ -21,7 +21,6 @@ function expect(name, cond, extra) {
 function makeSettings(port, cwd, overrides) {
   return Object.assign(
     {
-      provider: 'openai-compatible',
       baseUrl: `http://127.0.0.1:${port}/v1`,
       model: 'test-model',
       apiKey: 'test-key',

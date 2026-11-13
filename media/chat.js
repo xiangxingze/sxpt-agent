@@ -1,21 +1,25 @@
 const vscode = acquireVsCodeApi();
 
-const messagesEl = document.getElementById('messages');
-const inputEl = document.getElementById('input');
-const sendBtn = document.getElementById('btnSend');
-const stopBtn = document.getElementById('btnStop');
-const statusEl = document.getElementById('statusHint');
-const modelChip = document.getElementById('modelChip');
-const modeChip = document.getElementById('modeChip');
-const ctxText = document.getElementById('ctxText');
-const ctxDot = document.getElementById('ctxDot');
-const platformText = document.getElementById('platformText');
-const platformDot = document.getElementById('platformDot');
+const $ = (id) => document.getElementById(id);
+const messagesEl = $('messages');
+const inputEl = $('input');
+const sendBtn = $('btnSend');
+const stopBtn = $('btnStop');
+const statusEl = $('statusHint');
+const modelSelect = $('modelSelect');
+const modeSelect = $('modeSelect');
+const chatView = $('chatView');
+const settingsView = $('settingsView');
 
 let busy = false;
+let configured = false;
+let currentModel = '';
+let currentModels = [];
+let autoEdits = false;
 /** 当前正在流式输出的文本段；遇到工具调用、审批卡片后置空，后续文本另起一段，保持时间顺序 */
 let currentSeg = null;
 let planEl = null;
+let emptyEl = null;
 const tools = new Map();
 const approvals = new Map();
 
@@ -31,41 +35,25 @@ const TOOL_ICONS = {
   update_plan: '📋'
 };
 
+const SUGGESTIONS = [
+  { action: 'explain', label: '解释选中代码', hint: '先选中一段代码' },
+  { action: 'problem', label: '分析错误', hint: '读取问题面板并说明原因' },
+  { action: 'fix', label: '修复问题', hint: '定位、修改并运行验证' },
+  { action: 'tests', label: '生成测试', hint: '为选中代码编写并运行测试' },
+  { action: 'project', label: '理解项目结构', hint: '概述目录与模块' },
+  { action: 'refactor', label: '重构选中代码', hint: '给出方案并修改' }
+];
+
+/* ------------------------------------------------------------------ */
+/* 基础工具                                                            */
+/* ------------------------------------------------------------------ */
+
 function escapeHtml(text) {
-  return text
+  return String(text)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
-}
-
-function renderMarkdown(raw) {
-  const blocks = [];
-  let text = raw.replace(/```(\w*)\n([\s\S]*?)(```|$)/g, function (_, lang, code) {
-    const idx = blocks.length;
-    blocks.push('<pre><code>' + escapeHtml(code.replace(/\n$/, '')) + '</code></pre>');
-    return '\u0000BLOCK' + idx + '\u0000';
-  });
-
-  text = escapeHtml(text);
-  text = text.replace(/`([^`\n]+)`/g, '<code>$1</code>');
-  text = text.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
-
-  text = text.replace(/\u0000BLOCK(\d+)\u0000/g, function (_, i) {
-    return blocks[Number(i)];
-  });
-  return text;
-}
-
-function hideEmpty() {
-  const node = document.getElementById('emptyState');
-  if (node && node.parentNode) {
-    node.remove();
-  }
-}
-
-function scrollBottom() {
-  messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
 function el(tag, className, text) {
@@ -79,10 +67,214 @@ function el(tag, className, text) {
   return node;
 }
 
+function scrollBottom() {
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function hideEmpty() {
+  if (emptyEl && emptyEl.parentNode) {
+    emptyEl.remove();
+  }
+  emptyEl = null;
+}
+
+/* ------------------------------------------------------------------ */
+/* Markdown 渲染（先整体转义，再生成标签，输入中的 HTML 一律当文本）        */
+/* ------------------------------------------------------------------ */
+
+const FILE_REF = /^[\w@.\\/-]+\.[A-Za-z0-9]{1,8}(:\d+(:\d+)?)?$/;
+
+function renderInline(raw) {
+  const codes = [];
+  let text = escapeHtml(raw).replace(/`([^`\n]+)`/g, function (_, code) {
+    const decoded = code.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"');
+    const isRef = FILE_REF.test(decoded) && decoded.indexOf('//') < 0;
+    const html = isRef
+      ? '<code class="fileref" data-ref="' + code + '" title="在编辑器中打开">' + code + '</code>'
+      : '<code>' + code + '</code>';
+    codes.push(html);
+    return '\u0000C' + (codes.length - 1) + '\u0000';
+  });
+  text = text.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2">$1</a>');
+  text = text.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+  text = text.replace(/__([^_\n]+)__/g, '<strong>$1</strong>');
+  text = text.replace(/(^|[^\w*])\*([^*\s][^*\n]*?)\*(?![\w*])/g, '$1<em>$2</em>');
+  text = text.replace(/~~([^~\n]+)~~/g, '<del>$1</del>');
+  return text.replace(/\u0000C(\d+)\u0000/g, function (_, i) {
+    return codes[Number(i)];
+  });
+}
+
+const LIST_ITEM = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;
+const TABLE_SEP = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+
+function buildList(items) {
+  let html = '';
+  const stack = [];
+  items.forEach(function (it) {
+    const tag = it.ordered ? 'ol' : 'ul';
+    const top = stack[stack.length - 1];
+    if (!top || it.indent > top.indent) {
+      html += '<' + tag + '>';
+      stack.push({ indent: it.indent, tag: tag });
+    } else {
+      while (stack.length > 1 && it.indent < stack[stack.length - 1].indent) {
+        html += '</li></' + stack.pop().tag + '>';
+      }
+      html += '</li>';
+    }
+    html += '<li>' + renderInline(it.text).replace(/\n/g, '<br>');
+  });
+  while (stack.length) {
+    html += '</li></' + stack.pop().tag + '>';
+  }
+  return html;
+}
+
+function splitRow(line) {
+  let row = line.trim();
+  if (row.charAt(0) === '|') {
+    row = row.slice(1);
+  }
+  if (row.charAt(row.length - 1) === '|') {
+    row = row.slice(0, -1);
+  }
+  return row.split('|').map(function (c) {
+    return c.trim();
+  });
+}
+
+function codeBlockHtml(lang, code) {
+  return (
+    '<div class="code"><div class="code-head"><span class="lang">' +
+    escapeHtml(lang || 'code') +
+    '</span><button class="copy" type="button">复制</button></div><pre><code>' +
+    escapeHtml(code) +
+    '</code></pre></div>'
+  );
+}
+
+function isBlockStart(line, next) {
+  return (
+    /^\u0000CODE\d+\u0000$/.test(line.trim()) ||
+    /^#{1,6}\s+/.test(line) ||
+    /^\s*([-*_])\1{2,}\s*$/.test(line) ||
+    /^\s*>/.test(line) ||
+    LIST_ITEM.test(line) ||
+    (line.indexOf('|') >= 0 && next !== undefined && TABLE_SEP.test(next))
+  );
+}
+
+function renderMarkdown(src) {
+  const blocks = [];
+  // 围栏代码块；流式输出时尚未闭合的代码块也先按代码块展示
+  const text = String(src).replace(
+    /(^|\n)```([^\n`]*)\n([\s\S]*?)(\n```[ \t]*(?=\n|$)|$)/g,
+    function (_, pre, lang, code) {
+      blocks.push(codeBlockHtml(lang.trim(), code));
+      return pre + '\u0000CODE' + (blocks.length - 1) + '\u0000';
+    }
+  );
+
+  const lines = text.split('\n');
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (!trimmed) {
+      i++;
+      continue;
+    }
+    const codeM = /^\u0000CODE(\d+)\u0000$/.exec(trimmed);
+    if (codeM) {
+      out.push(blocks[Number(codeM[1])]);
+      i++;
+      continue;
+    }
+    const heading = /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
+    if (heading) {
+      const level = Math.min(heading[1].length + 1, 5);
+      out.push('<h' + level + '>' + renderInline(heading[2]) + '</h' + level + '>');
+      i++;
+      continue;
+    }
+    if (/^\s*([-*_])\1{2,}\s*$/.test(line)) {
+      out.push('<hr>');
+      i++;
+      continue;
+    }
+    if (/^\s*>/.test(line)) {
+      const quote = [];
+      while (i < lines.length && /^\s*>/.test(lines[i])) {
+        quote.push(lines[i].replace(/^\s*>\s?/, ''));
+        i++;
+      }
+      out.push('<blockquote>' + renderInline(quote.join('\n')).replace(/\n/g, '<br>') + '</blockquote>');
+      continue;
+    }
+    if (line.indexOf('|') >= 0 && i + 1 < lines.length && TABLE_SEP.test(lines[i + 1])) {
+      const head = splitRow(line);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && lines[i].indexOf('|') >= 0 && lines[i].trim()) {
+        rows.push(splitRow(lines[i]));
+        i++;
+      }
+      let html = '<div class="table-wrap"><table><thead><tr>';
+      head.forEach(function (c) {
+        html += '<th>' + renderInline(c) + '</th>';
+      });
+      html += '</tr></thead><tbody>';
+      rows.forEach(function (r) {
+        html += '<tr>';
+        head.forEach(function (_, idx) {
+          html += '<td>' + renderInline(r[idx] || '') + '</td>';
+        });
+        html += '</tr>';
+      });
+      out.push(html + '</tbody></table></div>');
+      continue;
+    }
+    if (LIST_ITEM.test(line)) {
+      const items = [];
+      while (i < lines.length) {
+        const m = LIST_ITEM.exec(lines[i]);
+        if (!m) {
+          break;
+        }
+        items.push({ indent: m[1].replace(/\t/g, '    ').length, ordered: /\d/.test(m[2]), text: m[3] });
+        i++;
+        while (i < lines.length && /^\s{2,}\S/.test(lines[i]) && !LIST_ITEM.test(lines[i])) {
+          items[items.length - 1].text += '\n' + lines[i].trim();
+          i++;
+        }
+      }
+      out.push(buildList(items));
+      continue;
+    }
+    const para = [];
+    while (i < lines.length && lines[i].trim() && !(para.length && isBlockStart(lines[i], lines[i + 1]))) {
+      para.push(lines[i]);
+      i++;
+    }
+    out.push('<p>' + renderInline(para.join('\n')).replace(/\n/g, '<br>') + '</p>');
+  }
+  return out.join('');
+}
+
+/* ------------------------------------------------------------------ */
+/* 消息                                                                */
+/* ------------------------------------------------------------------ */
+
 function addMessage(kind, text) {
   hideEmpty();
   const node = el('div', 'msg ' + kind);
-  node.innerHTML = renderMarkdown(text);
+  if (kind === 'user') {
+    node.textContent = text;
+  } else {
+    node.innerHTML = renderMarkdown(text);
+  }
   messagesEl.appendChild(node);
   scrollBottom();
   return node;
@@ -90,21 +282,54 @@ function addMessage(kind, text) {
 
 function newSeg() {
   hideEmpty();
-  const node = el('div', 'msg assistant');
+  const node = el('div', 'msg assistant md');
   messagesEl.appendChild(node);
   currentSeg = { el: node, raw: '' };
   return currentSeg;
 }
 
+function renderEmpty() {
+  hideEmpty();
+  const box = el('div', 'empty');
+  if (!configured) {
+    box.appendChild(el('p', 'empty-title', '先连接一个模型服务'));
+    box.appendChild(
+      el('p', 'empty-sub', '填写 API 地址、API Key，并从接口返回的列表里选择模型，就可以开始使用。')
+    );
+    const go = el('button', 'primary wide', '前往设置');
+    go.addEventListener('click', openSettings);
+    box.appendChild(go);
+  } else {
+    box.appendChild(el('p', 'empty-title', '有什么可以帮你？'));
+    box.appendChild(
+      el('p', 'empty-sub', '描述你的任务，我会自己查看代码、修改文件、运行命令并验证。每次修改都先经你确认。')
+    );
+    const grid = el('div', 'suggest');
+    SUGGESTIONS.forEach(function (s) {
+      const b = el('button', 'suggest-btn');
+      b.dataset.action = s.action;
+      b.appendChild(el('span', 'suggest-label', s.label));
+      b.appendChild(el('span', 'suggest-hint', s.hint));
+      grid.appendChild(b);
+    });
+    box.appendChild(grid);
+  }
+  messagesEl.appendChild(box);
+  emptyEl = box;
+}
+
 function setBusy(value) {
   busy = value;
-  sendBtn.disabled = value;
   stopBtn.classList.toggle('hidden', !value);
   sendBtn.classList.toggle('hidden', value);
-  statusEl.textContent = value ? 'Agent 工作中…' : '就绪';
-  inputEl.placeholder = value
-    ? 'Agent 工作中，可点击停止…'
-    : '让 Agent 帮你理解、修改或调试代码…（Enter 发送，Shift+Enter 换行）';
+  refreshStatus();
+}
+
+function refreshStatus() {
+  if (busy) {
+    return;
+  }
+  statusEl.textContent = autoEdits ? '就绪 · 本次会话自动允许文件修改' : '就绪';
 }
 
 function send() {
@@ -112,12 +337,64 @@ function send() {
   if (!text || busy) {
     return;
   }
-  vscode.postMessage({ type: 'send', text });
+  vscode.postMessage({ type: 'send', text: text });
   inputEl.value = '';
-  inputEl.style.height = '';
+  autoGrow();
 }
 
-// ---------------- 工具调用 ----------------
+function autoGrow() {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 180) + 'px';
+}
+
+/* ------------------------------------------------------------------ */
+/* 模型 / 模式选择                                                      */
+/* ------------------------------------------------------------------ */
+
+function fillModelSelect() {
+  modelSelect.innerHTML = '';
+  const list = [];
+  if (currentModel) {
+    list.push(currentModel);
+  }
+  currentModels.forEach(function (m) {
+    if (list.indexOf(m) < 0) {
+      list.push(m);
+    }
+  });
+  if (list.length === 0) {
+    const none = el('option', '', '未配置模型');
+    none.value = '';
+    modelSelect.appendChild(none);
+  }
+  list.forEach(function (m) {
+    const o = el('option', '', m);
+    o.value = m;
+    modelSelect.appendChild(o);
+  });
+  const manage = el('option', '', '管理模型…');
+  manage.value = '__settings';
+  modelSelect.appendChild(manage);
+  modelSelect.value = currentModel || '';
+}
+
+modelSelect.addEventListener('change', function () {
+  if (modelSelect.value === '__settings' || modelSelect.value === '') {
+    modelSelect.value = currentModel || '';
+    openSettings();
+    return;
+  }
+  currentModel = modelSelect.value;
+  vscode.postMessage({ type: 'setModel', model: currentModel });
+});
+
+modeSelect.addEventListener('change', function () {
+  vscode.postMessage({ type: 'setMode', mode: modeSelect.value });
+});
+
+/* ------------------------------------------------------------------ */
+/* 工具调用 / 计划 / 审批 / 汇总                                          */
+/* ------------------------------------------------------------------ */
 
 function onToolStart(msg) {
   currentSeg = null;
@@ -152,8 +429,6 @@ function onToolEnd(msg) {
   scrollBottom();
 }
 
-// ---------------- 计划 ----------------
-
 function renderPlan(steps) {
   if (!planEl || !planEl.isConnected) {
     currentSeg = null;
@@ -172,8 +447,6 @@ function renderPlan(steps) {
   });
   scrollBottom();
 }
-
-// ---------------- 审批 ----------------
 
 function respond(id, decision) {
   const a = approvals.get(id);
@@ -219,17 +492,17 @@ function onApproval(msg) {
   }
 
   const actions = el('div', 'ap-actions');
-  if (r.canDiff) {
-    addAction(actions, '查看 Diff', 'link', function () {
-      vscode.postMessage({ type: 'openDiff', id: r.id });
-    });
-  }
   addAction(actions, '允许', 'primary', function () {
     respond(r.id, 'allow');
   });
   addAction(actions, '拒绝', 'secondary', function () {
     respond(r.id, 'deny');
   });
+  if (r.canDiff) {
+    addAction(actions, '查看 Diff', 'link', function () {
+      vscode.postMessage({ type: 'openDiff', id: r.id });
+    });
+  }
   if (r.kind !== 'bash') {
     addAction(actions, '本次会话全部允许', 'link', function () {
       respond(r.id, 'allowAllEdits');
@@ -259,8 +532,6 @@ function onApprovalDone(msg) {
   approvals.delete(msg.id);
 }
 
-// ---------------- 修改汇总 ----------------
-
 function onChanges(msg) {
   currentSeg = null;
   const card = el('div', 'changes');
@@ -283,102 +554,317 @@ function onChanges(msg) {
   scrollBottom();
 }
 
-// ---------------- 事件绑定 ----------------
+/* ------------------------------------------------------------------ */
+/* 设置页                                                              */
+/* ------------------------------------------------------------------ */
+
+const F = {
+  baseUrl: $('setBaseUrl'),
+  apiKey: $('setApiKey'),
+  model: $('setModel'),
+  allowed: $('setAllowed'),
+  contextWindow: $('setContextWindow'),
+  maxOutput: $('setMaxOutput'),
+  autoContext: $('setAutoContext'),
+  extra: $('setExtra')
+};
+let hasKey = false;
+let clearKey = false;
+/** 已保存的 API 地址：只有与它一致的模型列表才会进入输入框下方的模型选择 */
+let savedBaseUrl = '';
+let fetchTimer = null;
+
+function showView(name) {
+  chatView.classList.toggle('hidden', name !== 'chat');
+  settingsView.classList.toggle('hidden', name !== 'settings');
+}
+
+function openSettings() {
+  showView('settings');
+  clearErrors();
+  $('saveMsg').textContent = '';
+  vscode.postMessage({ type: 'settingsOpen' });
+}
+
+function closeSettings() {
+  showView('chat');
+  inputEl.focus();
+}
+
+function clearErrors() {
+  document.querySelectorAll('.err').forEach(function (e) {
+    e.textContent = '';
+  });
+}
+
+function fillDatalist(models) {
+  const list = $('modelList');
+  list.innerHTML = '';
+  models.forEach(function (m) {
+    const o = document.createElement('option');
+    o.value = m;
+    list.appendChild(o);
+  });
+}
+
+function updateKeyState() {
+  $('keyState').textContent = clearKey ? '（保存后将清除）' : hasKey ? '（已保存，留空表示不修改）' : '';
+  $('btnClearKey').classList.toggle('hidden', !hasKey || clearKey);
+}
+
+function setHint(text, isError) {
+  const hint = $('modelHint');
+  hint.textContent = text || '';
+  hint.classList.toggle('bad', !!isError);
+}
+
+function validBaseUrl(v) {
+  return /^https?:\/\/[^\s/]+/i.test(v.trim());
+}
+
+function requestModels() {
+  const baseUrl = F.baseUrl.value.trim();
+  if (!validBaseUrl(baseUrl)) {
+    setHint('请先填写正确的 API 地址（以 http:// 或 https:// 开头）。', true);
+    return;
+  }
+  $('btnFetch').disabled = true;
+  setHint('正在获取模型列表…', false);
+  vscode.postMessage({ type: 'fetchModels', baseUrl: baseUrl, apiKey: F.apiKey.value });
+}
+
+/** 地址或 Key 改动后稍作等待，自动拉取一次模型列表 */
+function scheduleAutoFetch() {
+  clearTimeout(fetchTimer);
+  fetchTimer = setTimeout(function () {
+    if (validBaseUrl(F.baseUrl.value) && (F.apiKey.value.trim() || hasKey || /localhost|127\.0\.0\.1/.test(F.baseUrl.value))) {
+      requestModels();
+    }
+  }, 700);
+}
+
+function onSettingsData(msg) {
+  const v = msg.values || {};
+  F.baseUrl.value = v.baseUrl || '';
+  savedBaseUrl = v.baseUrl || '';
+  F.apiKey.value = '';
+  F.model.value = v.model || '';
+  F.allowed.value = v.allowedCommands || '';
+  F.contextWindow.value = v.contextWindow || 128000;
+  F.maxOutput.value = v.maxOutputTokens || 8192;
+  F.autoContext.checked = v.autoContext !== false;
+  F.extra.value = v.systemPromptExtra || '';
+  document.querySelectorAll('input[name="approvalMode"]').forEach(function (r) {
+    r.checked = r.value === (v.approvalMode || 'ask');
+  });
+  hasKey = !!msg.hasKey;
+  clearKey = false;
+  updateKeyState();
+  fillDatalist(msg.models || []);
+  $('setupBanner').classList.toggle('hidden', !!msg.configured);
+  setHint((msg.models || []).length ? '已获取 ' + msg.models.length + ' 个模型，点击输入框选择，也可以手动输入。' : '', false);
+  $('testResult').textContent = '';
+  $('testResult').className = 'test-result';
+}
+
+function onModels(msg) {
+  $('btnFetch').disabled = false;
+  if (msg.ok) {
+    if (msg.silent || msg.baseUrl === savedBaseUrl) {
+      currentModels = msg.models;
+      fillModelSelect();
+    }
+    if (msg.baseUrl === F.baseUrl.value.trim().replace(/\/+$/, '')) {
+      fillDatalist(msg.models);
+      setHint('已获取 ' + msg.models.length + ' 个模型，点击输入框选择，也可以手动输入。', false);
+      if (!F.model.value.trim() && msg.models.length) {
+        F.model.value = msg.models[0];
+      }
+    }
+  } else if (!msg.silent) {
+    setHint(msg.message || '获取模型列表失败，请手动输入模型名称。', true);
+  }
+}
+
+function collectValues() {
+  const mode = document.querySelector('input[name="approvalMode"]:checked');
+  return {
+    baseUrl: F.baseUrl.value.trim(),
+    model: F.model.value.trim(),
+    approvalMode: mode ? mode.value : 'ask',
+    allowedCommands: F.allowed.value,
+    contextWindow: F.contextWindow.value,
+    maxOutputTokens: F.maxOutput.value,
+    autoContext: F.autoContext.checked,
+    systemPromptExtra: F.extra.value
+  };
+}
+
+$('btnSave').addEventListener('click', function () {
+  clearErrors();
+  $('saveMsg').textContent = '';
+  vscode.postMessage({
+    type: 'settingsSave',
+    values: collectValues(),
+    apiKey: F.apiKey.value,
+    clearKey: clearKey
+  });
+});
+$('btnCancel').addEventListener('click', closeSettings);
+$('btnBack').addEventListener('click', closeSettings);
+$('btnFetch').addEventListener('click', requestModels);
+$('btnClearKey').addEventListener('click', function () {
+  clearKey = true;
+  F.apiKey.value = '';
+  updateKeyState();
+});
+$('btnTest').addEventListener('click', function () {
+  const out = $('testResult');
+  out.textContent = '测试中…';
+  out.className = 'test-result';
+  vscode.postMessage({
+    type: 'testConnection',
+    baseUrl: F.baseUrl.value.trim(),
+    model: F.model.value.trim(),
+    apiKey: F.apiKey.value
+  });
+});
+F.baseUrl.addEventListener('input', scheduleAutoFetch);
+F.apiKey.addEventListener('input', function () {
+  clearKey = false;
+  updateKeyState();
+  scheduleAutoFetch();
+});
+
+/* ------------------------------------------------------------------ */
+/* 通用事件                                                            */
+/* ------------------------------------------------------------------ */
 
 sendBtn.addEventListener('click', send);
 stopBtn.addEventListener('click', function () {
   vscode.postMessage({ type: 'stop' });
 });
-
 inputEl.addEventListener('keydown', function (event) {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
     send();
   }
 });
+inputEl.addEventListener('input', autoGrow);
 
-inputEl.addEventListener('input', function () {
-  inputEl.style.height = 'auto';
-  inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
-});
-
-document.getElementById('btnNew').addEventListener('click', function () {
+$('btnNew').addEventListener('click', function () {
+  showView('chat');
   vscode.postMessage({ type: 'newSession' });
 });
-document.getElementById('btnClear').addEventListener('click', function () {
-  vscode.postMessage({ type: 'clearSession' });
-});
-document.getElementById('btnSettings').addEventListener('click', function () {
-  vscode.postMessage({ type: 'openSettings' });
-});
-document.getElementById('btnCtx').addEventListener('click', function () {
+$('btnSettings').addEventListener('click', openSettings);
+$('btnCtx').addEventListener('click', function () {
   vscode.postMessage({ type: 'showContext' });
 });
-document.getElementById('btnPlatform').addEventListener('click', function () {
-  vscode.postMessage({ type: 'refreshPlatform' });
-});
-modelChip.addEventListener('click', function () {
-  vscode.postMessage({ type: 'openSettings' });
-});
-modeChip.addEventListener('click', function () {
-  vscode.postMessage({ type: 'pickMode' });
-});
 
-document.getElementById('quick').addEventListener('click', function (event) {
+messagesEl.addEventListener('click', function (event) {
   const target = event.target;
-  if (!target || target.tagName !== 'BUTTON') {
+  if (!target || !target.closest) {
     return;
   }
-  vscode.postMessage({ type: 'quickAction', action: target.dataset.action });
+  const suggest = target.closest('.suggest-btn');
+  if (suggest) {
+    vscode.postMessage({ type: 'quickAction', action: suggest.dataset.action });
+    return;
+  }
+  const copy = target.closest('.copy');
+  if (copy) {
+    const pre = copy.closest('.code').querySelector('pre');
+    vscode.postMessage({ type: 'copy', text: pre ? pre.textContent : '' });
+    copy.textContent = '已复制';
+    setTimeout(function () {
+      copy.textContent = '复制';
+    }, 1500);
+    return;
+  }
+  const ref = target.closest('.fileref');
+  if (ref) {
+    vscode.postMessage({ type: 'openFile', ref: ref.dataset.ref });
+  }
 });
-
-function emptyStateHtml() {
-  return (
-    '<p class="empty-title">AI Coding Agent</p>' +
-    '<p class="empty-sub">告诉我你想做什么：解释代码、修复错误、补充测试、实现功能。我会自己查看代码、修改文件并运行验证。</p>' +
-    '<ul class="empty-list">' +
-    '<li><kbd>Ctrl+Alt+I</kbd> 打开对话</li>' +
-    '<li><kbd>Ctrl+Alt+E</kbd> 解释选中代码</li>' +
-    '<li>每次修改都会先打开 Diff，由你确认后才写入</li>' +
-    '<li>改错了可以点「撤销本次修改」</li>' +
-    '</ul>'
-  );
-}
 
 window.addEventListener('message', function (event) {
   const msg = event.data;
   switch (msg.type) {
-    case 'init':
-    case 'state':
-      if (msg.model) {
-        modelChip.textContent = msg.model;
-        modelChip.title = msg.provider + ' · 点击修改模型';
+    case 'state': {
+      if (msg.configured !== undefined) {
+        const changed = configured !== !!msg.configured;
+        configured = !!msg.configured;
+        if (changed && emptyEl) {
+          renderEmpty();
+        }
       }
-      if (msg.modeLabel) {
-        modeChip.textContent = msg.modeLabel;
-        modeChip.dataset.mode = msg.mode || '';
+      if (msg.model !== undefined) {
+        currentModel = msg.model;
+      }
+      if (msg.models) {
+        currentModels = msg.models;
+      }
+      if (msg.model !== undefined || msg.models) {
+        fillModelSelect();
+      }
+      if (msg.mode) {
+        modeSelect.value = msg.mode;
+      }
+      if (msg.autoEdits !== undefined) {
+        autoEdits = !!msg.autoEdits;
       }
       if (msg.contextLabel) {
-        ctxText.textContent = msg.contextLabel;
+        $('ctxText').textContent = msg.contextLabel;
       }
-      ctxDot.classList.toggle('warn', !!msg.contextWarn);
-      if (msg.platformStatus) {
-        platformText.textContent =
-          msg.platformStatus +
-          (msg.sessionCount ? ' · 会话 ' + msg.sessionCount + ' 条' : '') +
-          (msg.undoCount ? ' · 可回退 ' + msg.undoCount + ' 次' : '');
-        platformDot.classList.toggle(
-          'warn',
-          msg.platformStatus.indexOf('未配置') >= 0 || msg.platformStatus.indexOf('未连接') >= 0
-        );
+      if (msg.contextWarn !== undefined) {
+        $('ctxDot').classList.toggle('warn', !!msg.contextWarn);
       }
-      setBusy(!!msg.busy);
+      if (msg.busy !== undefined) {
+        setBusy(!!msg.busy);
+      } else {
+        refreshStatus();
+      }
       break;
+    }
     case 'context':
-      ctxText.textContent = msg.label;
-      ctxDot.classList.toggle('warn', !!msg.warn);
+      $('ctxText').textContent = msg.label;
+      $('ctxDot').classList.toggle('warn', !!msg.warn);
       break;
+    case 'showSettings':
+      openSettings();
+      break;
+    case 'settingsData':
+      onSettingsData(msg);
+      break;
+    case 'settingsError': {
+      const slot = $('err-' + msg.field);
+      if (slot) {
+        slot.textContent = msg.message;
+      }
+      $('saveMsg').textContent = '';
+      if (msg.field === 'contextWindow' || msg.field === 'maxOutputTokens') {
+        document.querySelector('details.adv').open = true;
+      }
+      break;
+    }
+    case 'settingsSaved':
+      configured = !!msg.configured;
+      closeSettings();
+      if (emptyEl) {
+        renderEmpty();
+      }
+      break;
+    case 'models':
+      onModels(msg);
+      break;
+    case 'testResult': {
+      const out = $('testResult');
+      out.textContent = (msg.ok ? '✓ ' : '✗ ') + msg.message;
+      out.className = 'test-result ' + (msg.ok ? 'ok' : 'bad');
+      break;
+    }
     case 'user':
+      showView('chat');
       currentSeg = null;
       planEl = null;
       addMessage('user', msg.text);
@@ -441,21 +927,18 @@ window.addEventListener('message', function (event) {
     case 'info':
       statusEl.textContent = msg.message;
       break;
-    case 'cleared': {
+    case 'cleared':
       messagesEl.innerHTML = '';
       tools.clear();
       approvals.clear();
       currentSeg = null;
       planEl = null;
-      const empty = el('div', 'empty');
-      empty.id = 'emptyState';
-      empty.innerHTML = emptyStateHtml();
-      messagesEl.appendChild(empty);
+      renderEmpty();
       break;
-    }
     default:
       break;
   }
 });
 
+renderEmpty();
 vscode.postMessage({ type: 'ready' });

@@ -118,7 +118,6 @@ try {
     'ptnAgent.openChat',
     'ptnAgent.explainSelection',
     'ptnAgent.settings',
-    'ptnAgent.testConnection',
     'ptnAgent.showContext',
     'ptnAgent.undoLastPatch',
     'ptnAgent.fixProblems',
@@ -126,10 +125,16 @@ try {
     'ptnAgent.checkPi',
     'ptnAgent.runTests',
     'ptnAgent.runCommand',
-    'ptnAgent.refreshPlatform',
     'ptnAgent.showProjectOutline',
-    'ptnAgent.checkCommand'
+    'ptnAgent.gotoProblem'
   ];
+  // package.json 声明的每个命令都必须已注册，否则命令面板里点了没反应
+  const declared = require(path.join(__dirname, '..', 'package.json')).contributes.commands.map((c) => c.command);
+  const undeclaredButMissing = declared.filter((c) => !commands.has(c));
+  if (undeclaredButMissing.length) {
+    console.error('DECLARED BUT NOT REGISTERED:', undeclaredButMissing.join(', '));
+    process.exitCode = 1;
+  }
   const missing = expected.filter((c) => !commands.has(c));
   if (missing.length) {
     console.error('MISSING COMMANDS:', missing.join(', '));

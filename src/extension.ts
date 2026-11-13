@@ -1,24 +1,23 @@
 import * as vscode from 'vscode';
-import { readConfig, providerDefaults, CONFIG_SECTION, ProviderKind, APPROVAL_MODE_LABELS } from './config';
+import { readConfig } from './config';
 import { SecretStore } from './secrets';
-import { testConnection } from './modelCheck';
 import { collectContext, contextToPrompt } from './contextCollector';
 import { ChangeTracker } from './changeTracker';
 import { DiffPreview } from './diffPreview';
 import { ChatViewProvider } from './chatView';
 import { PlatformClient, courseContextToPrompt } from './platform/client';
-import { getProjectOutline, clearProjectCache } from './project/outline';
-import { isDangerous, isWhitelisted } from './tools/commandRunner';
+import { getProjectOutline } from './project/outline';
 import { piSdkLoadError, probePiSdk } from './agent/piAgent';
 
 export function activate(context: vscode.ExtensionContext): void {
-  const output = vscode.window.createOutputChannel('PTN AI Coding Agent');
+  const output = vscode.window.createOutputChannel('AI Coding Agent');
   const secrets = new SecretStore(context);
   const tracker = new ChangeTracker(context, output);
   const diffs = new DiffPreview();
   diffs.register(context);
 
-  const platform = new PlatformClient(secrets, output);
+  // 平台上下文是管理员侧能力，学生没有配置入口；令牌由平台对接方注入，目前不提供
+  const platform = new PlatformClient(async () => undefined, output);
 
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 90);
   statusBar.command = 'ptnAgent.openChat';
@@ -52,7 +51,6 @@ export function activate(context: vscode.ExtensionContext): void {
   register('ptnAgent.fixProblems', () => provider.runQuickAction('fix'));
   register('ptnAgent.explainProject', () => provider.runQuickAction('project'));
   register('ptnAgent.newSession', () => provider.newSession());
-  register('ptnAgent.clearSession', () => provider.newSession());
   register('ptnAgent.undoLastPatch', async () => {
     await tracker.undoLast();
     await provider.pushState();
@@ -60,6 +58,9 @@ export function activate(context: vscode.ExtensionContext): void {
   register('ptnAgent.pickMode', () => provider.pickApprovalMode());
   register('ptnAgent.runTests', () => provider.runTests());
   register('ptnAgent.runCommand', () => provider.promptRunCommand());
+
+  // 所有设置、模型选择与连接测试都在侧栏的同一个设置页里完成
+  register('ptnAgent.settings', () => provider.openSettings());
 
   register('ptnAgent.checkPi', async () => {
     const sdk = await probePiSdk();
@@ -74,27 +75,6 @@ export function activate(context: vscode.ExtensionContext): void {
     dispose: () => provider.dispose()
   });
 
-  register('ptnAgent.refreshPlatform', async () => {
-    platform.clear();
-    clearProjectCache();
-    const cfg = readConfig();
-    if (!cfg.platformUrl) {
-      void vscode.window.showInformationMessage('未配置平台地址（ptnAgent.platformUrl）。');
-      return;
-    }
-    const ctx = await platform.getContext(cfg.platformUrl, true);
-    if (!ctx) {
-      void vscode.window.showWarningMessage(
-        `平台连接失败：${platform.lastErrorMessage ?? '未知原因'}。本地功能不受影响。`
-      );
-    } else {
-      void vscode.window.showInformationMessage(
-        `平台上下文已更新：${ctx.courseTitle ?? ctx.projectName ?? '课程'}`
-      );
-    }
-    await provider.pushState();
-  });
-
   register('ptnAgent.showProjectOutline', async () => {
     const outline = await getProjectOutline(true);
     const text = outline?.summary ?? '（未检测到工作区项目）';
@@ -103,38 +83,6 @@ export function activate(context: vscode.ExtensionContext): void {
       language: 'markdown'
     });
     await vscode.window.showTextDocument(doc, { preview: true });
-  });
-
-  register('ptnAgent.checkCommand', async () => {    const cfg = readConfig();
-    const input = await vscode.window.showInputBox({
-      title: '命令安全自检',
-      prompt: '输入命令，检查是否高危或是否在白名单',
-      ignoreFocusOut: true
-    });
-    if (!input) {
-      return;
-    }
-    const dangerous = isDangerous(input);
-    const whitelisted = isWhitelisted(input, cfg.allowedCommands);
-    void vscode.window.showInformationMessage(
-      `高危：${dangerous ? '是' : '否'}；白名单：${whitelisted ? '是' : '否'}`
-    );
-  });
-
-  register('ptnAgent.testConnection', async () => {
-    const cfg = readConfig();
-    const apiKey = await secrets.getApiKey();
-    await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: '测试模型连接…' },
-      async () => {
-        const result = await testConnection(cfg, apiKey);
-        if (result.ok) {
-          void vscode.window.showInformationMessage(`✅ ${result.message}`);
-        } else {
-          void vscode.window.showErrorMessage(`❌ ${result.message}`);
-        }
-      }
-    );
   });
 
   register('ptnAgent.showContext', async () => {
@@ -152,7 +100,7 @@ export function activate(context: vscode.ExtensionContext): void {
       ideText
     ];
     if (courseText) {
-      sections.push('## 实训平台上下文', courseText);
+      sections.push('## 课程上下文', courseText);
     }
     if (outline) {
       sections.push('## 项目结构摘要', outline.summary);
@@ -163,183 +111,6 @@ export function activate(context: vscode.ExtensionContext): void {
       language: 'markdown'
     });
     await vscode.window.showTextDocument(doc, { preview: true });
-  });
-
-  register('ptnAgent.settings', async () => {
-    const cfg = readConfig();
-    const pick = await vscode.window.showQuickPick(
-      [
-        {
-          label: '$(server) 选择模型供应商',
-          description: cfg.provider,
-          action: 'provider'
-        },
-        {
-          label: '$(link) 设置 API 地址',
-          description: cfg.baseUrl,
-          action: 'baseUrl'
-        },
-        {
-          label: '$(symbol-method) 设置模型名称',
-          description: cfg.model,
-          action: 'model'
-        },
-        {
-          label: '$(key) 设置 API Key',
-          description: (await secrets.hasApiKey()) ? '已保存（SecretStorage）' : '未设置',
-          action: 'apiKey'
-        },
-        {
-          label: '$(organization) 设置实训平台地址',
-          description: cfg.platformUrl || '未配置',
-          action: 'platformUrl'
-        },
-        {
-          label: '$(shield) 设置平台访问令牌',
-          description: (await secrets.getPlatformToken()) ? '已保存' : '未设置',
-          action: 'platformToken'
-        },
-        {
-          label: '$(checklist) 设置命令白名单',
-          description: cfg.allowedCommands.length ? `${cfg.allowedCommands.length} 条` : '空',
-          action: 'allowList'
-        },
-        {
-          label: '$(shield) 审批模式',
-          description: APPROVAL_MODE_LABELS[cfg.approvalMode],
-          action: 'mode'
-        },
-        { label: '$(beaker) 测试连接', action: 'test' },
-        { label: '$(gear) 打开完整设置', action: 'open' }
-      ],
-      { title: 'PTN AI Coding Agent 设置', placeHolder: '选择要修改的项' }
-    );
-
-    if (!pick) {
-      return;
-    }
-
-    const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
-    const target = vscode.ConfigurationTarget.Global;
-
-    switch (pick.action) {
-      case 'provider': {
-        const chosen = await vscode.window.showQuickPick(
-          [
-            { label: 'DeepSeek', value: 'deepseek' as ProviderKind },
-            { label: 'OpenAI 兼容接口', value: 'openai-compatible' as ProviderKind },
-            { label: 'Ollama（本地）', value: 'ollama' as ProviderKind }
-          ],
-          { title: '选择模型供应商' }
-        );
-        if (!chosen) {
-          return;
-        }
-        const defaults = providerDefaults(chosen.value);
-        await config.update('provider', chosen.value, target);
-        await config.update('baseUrl', defaults.baseUrl, target);
-        await config.update('model', defaults.model, target);
-        void vscode.window.showInformationMessage(
-          `已切换为 ${chosen.label}，记得确认 API Key。`
-        );
-        break;
-      }
-      case 'baseUrl': {
-        const value = await vscode.window.showInputBox({
-          title: 'API Base URL',
-          value: cfg.baseUrl,
-          prompt: '需包含版本路径，例如 https://api.deepseek.com/v1',
-          ignoreFocusOut: true,
-          validateInput: (v) =>
-            /^https?:\/\//.test(v.trim()) ? undefined : '请输入以 http:// 或 https:// 开头的地址'
-        });
-        if (value !== undefined) {
-          await config.update('baseUrl', value.trim().replace(/\/+$/, ''), target);
-        }
-        break;
-      }
-      case 'model': {
-        const value = await vscode.window.showInputBox({
-          title: '模型名称',
-          value: cfg.model,
-          prompt: '例如 deepseek-chat、qwen2.5-coder',
-          ignoreFocusOut: true
-        });
-        if (value !== undefined && value.trim()) {
-          await config.update('model', value.trim(), target);
-        }
-        break;
-      }
-      case 'apiKey': {
-        const saved = await secrets.promptForApiKey(cfg.provider);
-        if (saved) {
-          void vscode.window.showInformationMessage('API Key 已保存到 VS Code SecretStorage。');
-        }
-        break;
-      }
-      case 'test':
-        await vscode.commands.executeCommand('ptnAgent.testConnection');
-        break;
-      case 'mode':
-        await provider.pickApprovalMode();
-        break;
-      case 'platformUrl': {
-        const value = await vscode.window.showInputBox({
-          title: '实训平台地址',
-          value: cfg.platformUrl,
-          prompt: '例如 http://192.168.100.231:8080，留空表示不连接平台',
-          ignoreFocusOut: true,
-          validateInput: (v) =>
-            v.trim() === '' || /^https?:\/\//.test(v.trim())
-              ? undefined
-              : '请输入以 http:// 或 https:// 开头的地址'
-        });
-        if (value !== undefined) {
-          await config.update('platformUrl', value.trim().replace(/\/+$/, ''), target);
-          platform.clear();
-        }
-        break;
-      }
-      case 'platformToken': {
-        const value = await vscode.window.showInputBox({
-          title: '平台访问令牌',
-          prompt: '保存在 VS Code SecretStorage，用于访问平台上下文接口',
-          password: true,
-          ignoreFocusOut: true
-        });
-        if (value !== undefined) {
-          await secrets.setPlatformToken(value.trim());
-          platform.clear();
-        }
-        break;
-      }
-      case 'allowList': {
-        const value = await vscode.window.showInputBox({
-          title: '命令白名单',
-          value: cfg.allowedCommands.join(','),
-          prompt: '逗号分隔的命令前缀，例如 npm test,dotnet build；白名单不跳过硬性确认',
-          ignoreFocusOut: true
-        });
-        if (value !== undefined) {
-          const list = value
-            .split(',')
-            .map((s) => s.trim())
-            .filter((s) => s.length > 0);
-          await config.update('allowedCommands', list, target);
-        }
-        break;
-      }
-      case 'open':
-        await vscode.commands.executeCommand(
-          'workbench.action.openSettings',
-          '@ext:ptn.ptn-agent'
-        );
-        break;
-      default:
-        break;
-    }
-
-    await provider.pushState();
   });
 
   register('ptnAgent.gotoProblem', async () => {
@@ -393,17 +164,14 @@ export function activate(context: vscode.ExtensionContext): void {
   });
 
   // 激活后立即展示状态栏，避免侧栏未打开时没有任何入口提示
-  const cfg = readConfig();
-  statusBar.text = `$(comment-discussion) ${cfg.model}`;
-  statusBar.tooltip = '打开 PTN AI Coding Agent';
-  statusBar.show();
+  void provider.pushState();
 
   context.subscriptions.push(
     vscode.window.onDidChangeTextEditorSelection(() => void provider.refreshContext()),
     vscode.window.onDidChangeActiveTextEditor(() => void provider.refreshContext())
   );
 
-  output.appendLine('[ptn-agent] activated');
+  output.appendLine('[ai-agent] activated');
 }
 
 export function deactivate(): void {

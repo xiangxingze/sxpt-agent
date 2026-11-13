@@ -39,7 +39,6 @@ server.listen(0, '127.0.0.1', async () => {
   const storage = fs.mkdtempSync(path.join(os.tmpdir(), 'ptn-pi-models-'));
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ptn-pi-ws-'));
   const settings = {
-    provider: 'openai-compatible',
     baseUrl: `http://127.0.0.1:${port}/v1`,
     model: 'student-custom-model',
     apiKey: 'student-key',
@@ -83,7 +82,7 @@ server.listen(0, '127.0.0.1', async () => {
     const modelsFile = path.join(storage, 'pi-agent', 'models.json');
     expect('生成 Pi models.json', fs.existsSync(modelsFile));
     const models = JSON.parse(fs.readFileSync(modelsFile, 'utf8'));
-    const provider = models.providers['ptn-openai-compatible'];
+    const provider = models.providers['ptn-custom'];
     expect('写入自定义 baseUrl', provider.baseUrl === settings.baseUrl, provider.baseUrl);
     expect('写入自定义模型', provider.models[0].id === settings.model, provider.models[0].id);
     expect('写入上下文窗口与输出上限', provider.models[0].contextWindow === 64000 && provider.models[0].maxTokens === 2048);
@@ -93,8 +92,9 @@ server.listen(0, '127.0.0.1', async () => {
     expect('请求带 Bearer Key', requests.some((r) => r.auth === 'Bearer student-key'), JSON.stringify(requests));
     expect('请求使用学生模型', requests.some((r) => r.model === settings.model), JSON.stringify(requests));
 
-    const cfg = piModelsConfig({ ...settings, provider: 'ollama' });
-    expect('Ollama 不使用 Authorization 头', cfg.providers['ptn-ollama'].authHeader === false);
+    const noKey = piModelsConfig({ ...settings, apiKey: undefined });
+    expect('没有填写 Key（本地模型）时不发送 Authorization 头', noKey.providers['ptn-custom'].authHeader === false);
+    expect('填写了 Key 时发送 Authorization 头', provider.authHeader === true);
   } catch (err) {
     console.error('ERROR:', err.stack || err.message);
     fail++;

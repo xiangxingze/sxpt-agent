@@ -1,4 +1,4 @@
-import type { ApprovalMode, ProviderKind } from '../config';
+import type { ApprovalMode } from '../config';
 
 export interface AgentMessage {
   role: 'system' | 'user' | 'assistant';
@@ -48,7 +48,6 @@ export interface AgentHost {
 }
 
 export interface AgentSettings {
-  provider: ProviderKind;
   baseUrl: string;
   model: string;
   apiKey?: string;

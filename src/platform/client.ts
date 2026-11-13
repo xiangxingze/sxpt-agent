@@ -1,5 +1,4 @@
 import * as vscode from 'vscode';
-import { SecretStore } from '../secrets';
 
 export interface CourseContext {
   courseId?: string;
@@ -39,7 +38,8 @@ export class PlatformClient {
   private lastError?: string;
 
   constructor(
-    private readonly secrets: SecretStore,
+    /** 平台访问令牌由平台对接方注入；学生侧没有配置入口 */
+    private readonly getToken: () => Promise<string | undefined>,
     private readonly output: vscode.OutputChannel
   ) {}
 
@@ -63,7 +63,7 @@ export class PlatformClient {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 8000);
     try {
-      const token = await this.secrets.getPlatformToken();
+      const token = await this.getToken();
       const headers: Record<string, string> = { Accept: 'application/json' };
       if (token) {
         headers.Authorization = `Bearer ${token}`;

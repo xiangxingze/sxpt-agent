@@ -1,6 +1,13 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { readConfig, AgentConfig, ApprovalMode, APPROVAL_MODE_LABELS } from './config';
+import {
+  readConfig,
+  AgentConfig,
+  ApprovalMode,
+  APPROVAL_MODE_LABELS,
+  APPROVAL_MODE_HINTS,
+  isModelConfigured
+} from './config';
 import { SecretStore } from './secrets';
 import { collectContext, contextToPrompt } from './contextCollector';
 import { getChatHtml } from './webviewHtml';
@@ -15,7 +22,9 @@ import {
 import { toFriendlyError } from './modelCheck';
 import { ChangeTracker } from './changeTracker';
 import { DiffPreview } from './diffPreview';
-import { PlatformClient, CourseContext, courseContextToPrompt } from './platform/client';
+import { SettingsController } from './settingsController';
+import { isInsideRoots } from './agent/policy';
+import { PlatformClient, courseContextToPrompt } from './platform/client';
 import { getProjectOutline } from './project/outline';
 import { runCommand, isDangerous, isWhitelisted, detectTestCommand } from './tools/commandRunner';
 
@@ -68,7 +77,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private readonly session: SessionStore;
   /** 学生手动运行的命令输出，随下一条消息附带一次后清空 */
   private pendingContexts: string[] = [];
-  private lastCourse?: CourseContext;
+  private readonly settings: SettingsController;
+  private showSettingsOnReady = false;
   private readonly pendingApprovals = new Map<string, PendingApproval>();
 
   constructor(
@@ -82,6 +92,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     context: vscode.ExtensionContext
   ) {
     this.session = new SessionStore(context);
+    this.settings = new SettingsController(
+      context,
+      secrets,
+      output,
+      (message) => this.post(message),
+      () => this.pushState()
+    );
     this.agent = new PiAgent(this.createHost(), (line) => this.output.appendLine(line), context.globalStorageUri?.fsPath);
   }
 
@@ -277,6 +294,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     switch (msg?.type) {
       case 'ready':
         await this.pushState();
+        if (this.showSettingsOnReady) {
+          this.showSettingsOnReady = false;
+          this.post({ type: 'showSettings' });
+        }
+        void this.settings.refreshModelsIfNeeded();
         break;
       case 'send':
         await this.handleUserText(String(msg.text ?? ''));
@@ -285,23 +307,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.abort?.abort();
         break;
       case 'newSession':
-      case 'clearSession':
         await this.newSession();
-        break;
-      case 'openSettings':
-        await vscode.commands.executeCommand('ptnAgent.settings');
-        break;
-      case 'pickMode':
-        await this.pickApprovalMode();
         break;
       case 'showContext':
         await vscode.commands.executeCommand('ptnAgent.showContext');
         break;
       case 'quickAction':
         await this.runQuickAction(msg.action as QuickAction);
-        break;
-      case 'refreshPlatform':
-        await vscode.commands.executeCommand('ptnAgent.refreshPlatform');
         break;
       case 'approvalResponse':
         this.pendingApprovals.get(String(msg.id))?.finish(
@@ -319,9 +331,61 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await this.tracker.undoLast();
         await this.pushState();
         break;
+      case 'copy':
+        if (typeof msg.text === 'string' && msg.text.length < 1_000_000) {
+          await vscode.env.clipboard.writeText(msg.text);
+        }
+        break;
+      case 'openFile':
+        await this.openFileRef(String(msg.ref ?? ''));
+        break;
       default:
+        await this.settings.handle(msg);
         break;
     }
+  }
+
+  /** 打开设置页（侧栏内的单页设置）。侧栏尚未创建时，等 ready 后再展示。 */
+  async openSettings(): Promise<void> {
+    if (this.view) {
+      this.post({ type: 'showSettings' });
+    } else {
+      this.showSettingsOnReady = true;
+    }
+    await this.reveal();
+  }
+
+  /** 点击回答里的「文件:行号」引用，在编辑器中打开 */
+  private async openFileRef(ref: string): Promise<void> {
+    const match = /^(.+?)(?::(\d+))?(?::\d+)?$/.exec(ref.trim());
+    if (!match) {
+      return;
+    }
+    const relPath = match[1].replace(/^@/, '');
+    const line = match[2] ? Math.max(0, parseInt(match[2], 10) - 1) : 0;
+    const roots = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
+    let target: vscode.Uri | undefined;
+    for (const root of roots) {
+      const abs = path.resolve(root, relPath);
+      if (isInsideRoots(roots, abs) && (await exists(abs))) {
+        target = vscode.Uri.file(abs);
+        break;
+      }
+    }
+    if (!target && !path.isAbsolute(relPath) && !relPath.includes('..')) {
+      const found = await vscode.workspace.findFiles(`**/${relPath}`, '**/node_modules/**', 1);
+      target = found[0];
+    }
+    if (!target) {
+      void vscode.window.showInformationMessage(`没有在工作区中找到 ${relPath}`);
+      return;
+    }
+    const doc = await vscode.workspace.openTextDocument(target);
+    const position = new vscode.Position(Math.min(line, Math.max(0, doc.lineCount - 1)), 0);
+    await vscode.window.showTextDocument(doc, {
+      selection: new vscode.Range(position, position),
+      preview: true
+    });
   }
 
   async pickApprovalMode(): Promise<void> {
@@ -330,19 +394,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       {
         label: '逐项确认',
         description: current === 'ask' ? '当前' : '',
-        detail: '每次修改文件、运行命令都先让你确认（推荐）',
+        detail: APPROVAL_MODE_HINTS.ask,
         value: 'ask'
       },
       {
         label: '自动应用修改',
         description: current === 'autoEdit' ? '当前' : '',
-        detail: '工作区内的文件修改直接应用，可一键撤销；运行命令仍需确认',
+        detail: APPROVAL_MODE_HINTS.autoEdit,
         value: 'autoEdit'
       },
       {
         label: '只读',
         description: current === 'readOnly' ? '当前' : '',
-        detail: 'Agent 只能查看代码和诊断，不能修改文件或运行命令',
+        detail: APPROVAL_MODE_HINTS.readOnly,
         value: 'readOnly'
       }
     ];
@@ -361,38 +425,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const label = this.describeContext();
     this.post({
       type: 'state',
+      configured: isModelConfigured(cfg),
       model: cfg.model,
-      provider: cfg.provider,
+      models: this.settings.cachedModels(),
       mode: cfg.approvalMode,
-      modeLabel: APPROVAL_MODE_LABELS[cfg.approvalMode] + (this.agent.autoEditsEnabled ? ' · 本次会话自动允许修改' : ''),
+      autoEdits: this.agent.autoEditsEnabled,
       busy: this.busy,
       contextLabel: label,
       contextWarn: label.indexOf('未打开') >= 0,
       sessionCount: this.session.count,
-      undoCount: this.tracker.undoCount,
-      platformStatus: this.platformStatusText(cfg.platformUrl)
+      undoCount: this.tracker.undoCount
     });
     this.updateStatusBar();
   }
 
-  private platformStatusText(platformUrl: string): string {
-    if (!platformUrl) {
-      return '平台未配置';
-    }
-    if (!this.lastCourse) {
-      return '平台未连接';
-    }
-    return this.lastCourse.fromCache
-      ? `平台缓存 · ${this.lastCourse.courseTitle ?? this.lastCourse.projectName ?? '课程'}`
-      : `平台已连接 · ${this.lastCourse.courseTitle ?? this.lastCourse.projectName ?? '课程'}`;
-  }
-
   private updateStatusBar(): void {
     const cfg = readConfig();
-    this.statusBar.text = this.busy
-      ? `$(sync~spin) ${cfg.model}`
-      : `$(comment-discussion) ${cfg.model}`;
-    this.statusBar.tooltip = `PTN AI Coding Agent · ${APPROVAL_MODE_LABELS[cfg.approvalMode]} · ${cfg.provider} · ${cfg.baseUrl}`;
+    if (!isModelConfigured(cfg)) {
+      this.statusBar.text = '$(comment-discussion) 未配置模型';
+      this.statusBar.tooltip = '点击打开 AI Agent，并在设置中配置模型服务';
+    } else {
+      this.statusBar.text = this.busy ? `$(sync~spin) ${cfg.model}` : `$(comment-discussion) ${cfg.model}`;
+      this.statusBar.tooltip = `AI Agent · ${APPROVAL_MODE_LABELS[cfg.approvalMode]} · ${cfg.baseUrl}`;
+    }
     this.statusBar.show();
   }
 
@@ -442,7 +497,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return undefined;
     }
     return {
-      provider: cfg.provider,
       baseUrl: cfg.baseUrl,
       model: cfg.model,
       apiKey,
@@ -465,14 +519,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     const cfg = readConfig();
-    const apiKey = await this.secrets.getApiKey();
-    if (cfg.provider !== 'ollama' && !apiKey) {
-      const set = await vscode.window.showWarningMessage('尚未配置 API Key，无法调用模型。', '去配置');
-      if (set === '去配置') {
-        await vscode.commands.executeCommand('ptnAgent.settings');
-      }
+    if (!isModelConfigured(cfg)) {
+      await this.openSettings();
       return;
     }
+    const apiKey = await this.secrets.getApiKey();
     const settings = this.buildSettings(cfg, apiKey);
     if (!settings) {
       const open = await vscode.window.showWarningMessage(
@@ -488,7 +539,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.busy = true;
     this.updateStatusBar();
     this.post({ type: 'user', text: trimmed });
-    this.post({ type: 'state', model: cfg.model, provider: cfg.provider, busy: true });
+    this.post({ type: 'state', busy: true });
 
     this.tracker.beginRun();
     const controller = new AbortController();
@@ -561,13 +612,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const blocks: string[] = [];
 
     if (cfg.platformUrl) {
-      const course = await this.platform.getContext(cfg.platformUrl);
-      this.lastCourse = course;
-      const prompt = courseContextToPrompt(course);
+      const prompt = courseContextToPrompt(await this.platform.getContext(cfg.platformUrl));
       if (prompt) {
         blocks.push(prompt);
       } else if (this.platform.lastErrorMessage) {
-        this.notify(`实训平台不可用：${this.platform.lastErrorMessage}，已按本地模式继续。`, 'warn');
+        // 平台上下文属于管理员配置，不可用时不打扰学生，仅记录日志
+        this.output.appendLine(`[platform] 不可用：${this.platform.lastErrorMessage}，已按本地模式继续`);
       }
     }
 
@@ -680,4 +730,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 function normalizeFsPath(p: string): string {
   const resolved = path.resolve(p);
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+async function exists(p: string): Promise<boolean> {
+  try {
+    await vscode.workspace.fs.stat(vscode.Uri.file(p));
+    return true;
+  } catch {
+    return false;
+  }
 }

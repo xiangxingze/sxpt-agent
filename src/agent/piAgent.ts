@@ -76,21 +76,20 @@ export async function probePiSdk(): Promise<PiProbeResult> {
   return { ok: true, version };
 }
 
-function providerIdFor(settings: AgentSettings): string {
-  // 使用扩展专属 Provider，避免覆盖学生其它 Pi 配置
-  return `ptn-${settings.provider}`;
-}
+/** 扩展专属的 Provider ID：接口地址、模型、Key 全部来自学生在设置页填写的内容 */
+const PROVIDER_ID = 'ptn-custom';
 
 export function piModelsConfig(settings: AgentSettings): Record<string, unknown> {
   return {
     $schema: 'https://pi.dev/schemas/models.schema.json',
     providers: {
-      [providerIdFor(settings)]: {
-        name: `PTN ${settings.provider}`,
+      [PROVIDER_ID]: {
+        name: 'PTN custom',
         baseUrl: settings.baseUrl,
         api: 'openai-completions',
         apiKey: '$PTN_AGENT_RUNTIME_KEY',
-        authHeader: settings.provider !== 'ollama',
+        // 没有填写 Key（例如本地模型）时不发送 Authorization 头
+        authHeader: !!settings.apiKey,
         models: [
           {
             id: settings.model,
@@ -121,7 +120,6 @@ function sessionKey(settings: AgentSettings): string {
     .digest('hex')
     .slice(0, 12);
   return JSON.stringify([
-    settings.provider,
     settings.baseUrl,
     settings.model,
     keyHash,
@@ -300,14 +298,14 @@ export class PiAgent {
     const modelsPath = path.join(agentDir, 'models.json');
     await fs.writeFile(modelsPath, JSON.stringify(piModelsConfig(settings), null, 2), 'utf8');
 
-    const providerId = providerIdFor(settings);
+    const providerId = PROVIDER_ID;
     const modelRuntime = await sdk.ModelRuntime.create({
       authPath: path.join(agentDir, 'auth.json'),
       modelsPath,
       refreshOnCreate: false
     });
     if (typeof modelRuntime.setRuntimeApiKey === 'function') {
-      await modelRuntime.setRuntimeApiKey(providerId, settings.apiKey ?? 'ollama');
+      await modelRuntime.setRuntimeApiKey(providerId, settings.apiKey ?? 'no-key');
     }
     let model = modelRuntime.getModel?.(providerId, settings.model);
     if (!model) {

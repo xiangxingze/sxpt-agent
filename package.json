@@ -1,9 +1,9 @@
 {
-  "name": "ptn-agent",
-  "displayName": "PTN AI Coding Agent",
+  "name": "sxpt-agent",
+  "displayName": "SXPT AI Coding Agent",
   "description": "实训平台内置 VS Code 的 AI 编程 Agent：自主查看代码、修改文件、运行命令并验证，所有修改经 Diff 审核、可一键撤销。",
   "version": "0.2.0",
-  "publisher": "ptn",
+  "publisher": "sxpt",
   "license": "MIT",
   "engines": {
     "vscode": "^1.90.0"
@@ -75,19 +75,11 @@
       },
       {
         "command": "ptnAgent.settings",
-        "title": "AI Agent: 模型设置"
-      },
-      {
-        "command": "ptnAgent.testConnection",
-        "title": "AI Agent: 测试模型连接"
+        "title": "AI Agent: 打开设置"
       },
       {
         "command": "ptnAgent.newSession",
-        "title": "AI Agent: 新建会话"
-      },
-      {
-        "command": "ptnAgent.clearSession",
-        "title": "AI Agent: 清空会话"
+        "title": "AI Agent: 新建对话"
       },
       {
         "command": "ptnAgent.showContext",
@@ -106,16 +98,8 @@
         "title": "AI Agent: 运行命令"
       },
       {
-        "command": "ptnAgent.refreshPlatform",
-        "title": "AI Agent: 刷新平台上下文"
-      },
-      {
         "command": "ptnAgent.showProjectOutline",
         "title": "AI Agent: 查看项目结构摘要"
-      },
-      {
-        "command": "ptnAgent.checkCommand",
-        "title": "AI Agent: 命令安全自检"
       },
       {
         "command": "ptnAgent.gotoProblem",
@@ -198,30 +182,15 @@
           "default": "ask",
           "description": "Agent 审批模式"
         },
-        "ptnAgent.provider": {
-          "type": "string",
-          "enum": [
-            "deepseek",
-            "openai-compatible",
-            "ollama"
-          ],
-          "enumDescriptions": [
-            "DeepSeek 官方接口",
-            "任意 OpenAI 兼容接口",
-            "本地 Ollama"
-          ],
-          "default": "deepseek",
-          "description": "模型供应商"
-        },
         "ptnAgent.baseUrl": {
           "type": "string",
-          "default": "https://api.deepseek.com/v1",
-          "description": "API Base URL，需包含版本路径，例如 https://api.deepseek.com/v1"
+          "default": "",
+          "description": "模型服务的 API 地址（OpenAI 兼容接口，需包含版本路径，例如 https://api.example.com/v1）。建议在侧栏「设置」页中填写。"
         },
         "ptnAgent.model": {
           "type": "string",
-          "default": "deepseek-chat",
-          "description": "模型名称"
+          "default": "",
+          "description": "模型名称，需要支持工具调用（function calling）。建议在侧栏「设置」页中从接口返回的列表里选择。"
         },
         "ptnAgent.contextWindow": {
           "type": "number",
@@ -251,12 +220,13 @@
         "ptnAgent.platformUrl": {
           "type": "string",
           "default": "",
-          "description": "实训平台 API 地址，留空表示不连接平台"
+          "scope": "machine",
+          "description": "（管理员配置，学生无需填写）实训平台上下文接口地址，留空表示不连接平台"
         },
         "ptnAgent.systemPromptExtra": {
           "type": "string",
           "default": "",
-          "description": "追加到系统提示词的自定义内容，例如课程规范"
+          "description": "自定义指令：追加到系统提示词，例如课程的代码规范"
         },
         "ptnAgent.includeProjectContext": {
           "type": "boolean",
@@ -284,11 +254,12 @@
     "watch": "tsc -watch -p ./",
     "package": "vsce package",
     "lint": "tsc --noEmit -p ./",
-    "check": "node scripts/check-policy.js && node scripts/check-commands.js && node scripts/check-session.js && node scripts/check-platform.js && node scripts/check-undo.js && node scripts/check-pi-custom-provider.js && node scripts/check-agent.js && node scripts/check-chat.js && node scripts/smoke.js"
+    "check": "node scripts/check-policy.js && node scripts/check-commands.js && node scripts/check-session.js && node scripts/check-platform.js && node scripts/check-undo.js && node scripts/check-models.js && node scripts/check-pi-custom-provider.js && node scripts/check-agent.js && node scripts/check-chat.js && node scripts/check-webview.js && node scripts/smoke.js"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/vscode": "^1.90.0",
+    "jsdom": "^29.1.1",
     "typescript": "^5.7.2"
   },
   "dependencies": {

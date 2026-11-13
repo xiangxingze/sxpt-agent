@@ -1,4 +1,4 @@
-# PTN AI Coding Agent
+# SXPT AI Coding Agent
 
 实训平台内置 VS Code 中的 AI 编程 Agent 扩展。
 
@@ -49,7 +49,7 @@ Agent 基于内置的 [Pi](https://www.npmjs.com/package/@earendil-works/pi-codi
 
 ## 对话与上下文
 
-- 活动栏入口、侧栏对话、右键菜单、快捷键
+- 活动栏入口、侧栏对话、右键菜单、快捷键；回答按 Markdown 渲染（标题、列表、表格、带语言标签和复制按钮的代码块）；回答里的 `文件:行号` 可点击跳转
 - 每条消息自动附带当前文件、选区、光标、语言、诊断、Git 分支、终端输出（带敏感信息脱敏）
 - 项目类问题自动附带项目结构摘要
 - 可随时查看「下一条消息将发送什么」（`AI Agent: 查看当前上下文`）
@@ -72,56 +72,66 @@ npm run compile
 ```bash
 npm install -g @vscode/vsce
 npm run package
-code --install-extension ptn-agent-0.2.0.vsix
+code --install-extension sxpt-agent-0.2.0.vsix
 ```
 
 安装包约 26 MB，已包含 Pi 运行依赖。
 
 ## 配置
 
-命令面板执行 `AI Agent: 模型设置`，或在设置中搜索 `ptnAgent`。
+所有常用设置都在侧栏的**一个设置页**里完成：点击顶栏的 ⚙，或命令面板执行 `AI Agent: 打开设置`。
+
+| 分组 | 内容 |
+| --- | --- |
+| 模型服务 | **API 地址**、**API Key**、**模型**（从你填的 API 地址自动获取列表，也可手动输入）、测试连接 |
+| Agent 行为 | 审批模式（逐项确认 / 自动应用修改 / 只读）、免确认的命令前缀 |
+| 高级（折叠） | 上下文窗口、单次最大输出、是否自动附带当前文件、自定义指令 |
+
+- **没有预设供应商**：接入任何 OpenAI 兼容接口（DeepSeek、通义、OpenAI、Ollama、vLLM、公司内部网关……），模型列表来自 `GET {API 地址}/models`。接口不提供列表时，手动输入模型名即可。
+- **API Key** 只保存在 VS Code SecretStorage，不写入配置文件，也不会回传给设置页（页面只显示「已保存」）。本地模型可以不填 Key。
+- 输入框下方可直接切换模型和审批模式，不必进设置页。
+- 首次使用时侧栏会引导你填写这三项，填好才能开始对话。
+
+对应的 VS Code 配置项（搜索 `ptnAgent`）：
 
 | 配置项 | 说明 | 默认 |
 | --- | --- | --- |
-| `ptnAgent.approvalMode` | 审批模式：`ask` / `autoEdit` / `readOnly` | `ask` |
-| `ptnAgent.provider` | `deepseek` / `openai-compatible` / `ollama` | `deepseek` |
-| `ptnAgent.baseUrl` | API 地址，含版本路径 | `https://api.deepseek.com/v1` |
-| `ptnAgent.model` | 模型名称，需支持工具调用（function calling） | `deepseek-chat` |
+| `ptnAgent.baseUrl` | API 地址，含版本路径，如 `https://api.example.com/v1` | 空 |
+| `ptnAgent.model` | 模型名称，需支持工具调用（function calling） | 空 |
+| `ptnAgent.approvalMode` | `ask` / `autoEdit` / `readOnly` | `ask` |
+| `ptnAgent.allowedCommands` | 可免确认执行的命令前缀，如 `npm test` | `[]` |
 | `ptnAgent.contextWindow` | 模型上下文窗口（token），用于自动压缩 | `128000` |
 | `ptnAgent.maxOutputTokens` | 单次回复最大输出 token | `8192` |
+| `ptnAgent.autoContext` | 自动附带当前文件与选区 | `true` |
+| `ptnAgent.systemPromptExtra` | 自定义指令，追加到系统提示词 | 空 |
 | `ptnAgent.runTimeoutMs` | 单次任务最长运行时间 | `600000` |
 | `ptnAgent.commandTimeoutMs` | 单条命令超时 | `120000` |
-| `ptnAgent.allowedCommands` | 可免确认执行的命令前缀，如 `npm test` | `[]` |
 | `ptnAgent.maxContextLines` | 单次附带的最大代码行数 | `400` |
-| `ptnAgent.autoContext` | 自动附带当前文件与选区 | `true` |
 | `ptnAgent.includeProjectContext` | 项目类问题附带结构摘要 | `true` |
-| `ptnAgent.platformUrl` | 实训平台地址，留空不连接 | 空 |
-| `ptnAgent.systemPromptExtra` | 追加课程规范到系统提示词 | 空 |
+| `ptnAgent.platformUrl` | （管理员配置，学生无需填写）平台上下文接口地址 | 空 |
 
-API Key 与平台令牌通过 `AI Agent: 模型设置` 写入 SecretStorage。
-
-**模型要求**：Agent 依赖模型的工具调用能力。DeepSeek、GPT-4 系列、Qwen2.5-Coder 及以上等支持 function calling 的模型可用；不支持工具调用的模型只能对话，无法完成多步任务。Provider 目前按 OpenAI-compatible Chat Completions 接口接入。
+**模型要求**：Agent 依赖模型的工具调用能力。DeepSeek、GPT-4 系列、Qwen2.5-Coder 及以上等支持 function calling 的模型可用；不支持工具调用的模型只能对话，无法完成多步任务。接口目前按 OpenAI-compatible Chat Completions 接入。
 
 ## 命令
 
 | 命令 | 快捷键 |
 | --- | --- |
 | `AI Agent: 打开对话` | `Ctrl+Alt+I` |
+| `AI Agent: 打开设置` | — |
+| `AI Agent: 新建对话` | — |
 | `AI Agent: 解释选中代码` | `Ctrl+Alt+E` |
-| `AI Agent: 分析当前错误` | — |
-| `AI Agent: 修复当前问题` | — |
-| `AI Agent: 生成单元测试` | — |
-| `AI Agent: 理解项目结构` | — |
-| `AI Agent: 重构选中代码` | — |
+| `AI Agent: 分析当前错误` / `修复当前问题` | — |
+| `AI Agent: 生成单元测试` / `重构选中代码` / `理解项目结构` | — |
 | `AI Agent: 切换审批模式` | — |
 | `AI Agent: 撤销上次 AI 修改` | — |
 | `AI Agent: 定位问题` | — |
 | `AI Agent: 运行测试或构建` / `运行命令` | — |
 | `AI Agent: 查看当前上下文` / `查看项目结构摘要` | — |
-| `AI Agent: 刷新平台上下文` | — |
-| `AI Agent: 模型设置` / `测试模型连接` / `检查 Agent 运行环境` | — |
+| `AI Agent: 检查 Agent 运行环境` | — |
 
-## 平台上下文契约
+## 平台上下文（管理员侧，学生不可见）
+
+学生界面不提供任何实训平台地址或令牌的配置。平台对接由管理员在部署时配置 `ptnAgent.platformUrl`，扩展会请求：
 
 `GET {platformUrl}/api/agent/context?workspace=<name>`，可选 `Authorization: Bearer <token>`。
 
@@ -137,9 +147,9 @@ API Key 与平台令牌通过 `AI Agent: 模型设置` 写入 SecretStorage。
 }
 ```
 
-也接受 `{ "context": { ... } }` 或 `{ "course": { "title": "...", "id": "..." } }` 形式。请求失败或超时会回退到缓存，再失败则按本地模式继续，不影响对话。平台上下文会随每条消息一起发给 Agent。
+也接受 `{ "context": { ... } }` 或 `{ "course": { "title": "...", "id": "..." } }` 形式。请求失败或超时会回退到缓存，再失败则按本地模式继续，不影响对话，也不会向学生弹出提示。上下文会随每条消息一起发给 Agent。
 
-> 平台对接目前只有扩展侧；后端接口、身份绑定、统一模型网关和审计上报尚未实现。
+> 平台对接目前只有扩展侧：后端接口、身份绑定、令牌下发、统一模型网关和审计上报都尚未实现，暂缓处理。
 
 ## 目录结构
 
@@ -161,9 +171,10 @@ ptn-agent/
 │   ├── platform/client.ts     平台上下文与缓存
 │   ├── tools/commandRunner.ts 高危命令规则、白名单、命令分级
 │   ├── prompts.ts             系统提示词
-│   ├── modelCheck.ts          连接测试、错误友好化
+│   ├── settingsController.ts  设置页后端：读写设置、按所填 API 获取模型、连接测试
+│   ├── modelCheck.ts          模型列表解析、连接测试、错误友好化
 │   ├── config.ts / secrets.ts / webviewHtml.ts
-├── media/                     侧栏前端（chat.js / chat.css）
+├── media/                     侧栏前端（chat.js 含 Markdown 渲染器与设置页 / chat.css）
 └── scripts/                   自检脚本
 ```
 
@@ -184,7 +195,9 @@ npm run check
 | `check-session.js` / `check-platform.js` | 会话裁剪与持久化、平台客户端与降级 |
 | `check-pi-custom-provider.js` | 自定义 Base URL / 模型 / Bearer Key 注入，Key 不落盘 |
 | `check-agent.js` | 真实 Pi SDK + 脚本化假模型：多步工具链、拦截与审批、只读/自动模式、未保存保护、停止、接口报错 |
-| `check-chat.js` | 侧栏消息协议顺序、审批往返、原生弹窗降级、停止、撤销 |
+| `check-models.js` | `/models` 三种响应形态解析、按所填地址获取、401/404/空列表、连接测试、错误友好化 |
+| `check-chat.js` | 侧栏消息协议、审批往返、原生弹窗降级、停止、撤销；设置页读写与校验、Key 不回传、模型快速切换、复制与打开文件 |
+| `check-webview.js` | jsdom 驱动前端：Markdown 渲染与转义、首次引导、设置页交互、模型/模式选择、审批卡片 |
 | `smoke.js` | 扩展激活与命令注册 |
 
 ## 已知限制

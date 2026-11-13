@@ -11,9 +11,24 @@ function chunk(delta, finish) {
 }
 
 /** 创建一个按「请求序号」依次返回脚本步骤的假模型服务 */
-function createModelServer(steps) {
+function createModelServer(steps, options) {
+  const opts = options || {};
   const seen = [];
   const server = http.createServer((req, res) => {
+    // GET /models：模型列表（options.models 为 undefined 时返回 404，模拟不提供列表的接口）
+    if (req.method === 'GET' && req.url.endsWith('/models')) {
+      seen.listAuth = req.headers.authorization;
+      seen.listCalls = (seen.listCalls || 0) + 1;
+      if (opts.modelsStatus) {
+        res.writeHead(opts.modelsStatus, { 'Content-Type': 'application/json' }).end('{}');
+      } else if (opts.models === undefined) {
+        res.writeHead(404).end();
+      } else {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(opts.modelsBody || { object: 'list', data: opts.models.map((id) => ({ id, object: 'model' })) }));
+      }
+      return;
+    }
     if (req.method !== 'POST' || !req.url.endsWith('/chat/completions')) {
       res.writeHead(404).end();
       return;

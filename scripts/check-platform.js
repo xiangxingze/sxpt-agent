@@ -24,7 +24,7 @@ const { PlatformClient, courseContextToPrompt } = require(
 );
 
 const output = { appendLine: () => {} };
-const secrets = { getPlatformToken: async () => 'tok-123' };
+const getToken = async () => 'tok-123';
 
 let fail = 0;
 function expect(name, cond) {
@@ -72,7 +72,7 @@ server.listen(0, '127.0.0.1', async () => {
   const port = server.address().port;
   const base = `http://127.0.0.1:${port}`;
 
-  const client = new PlatformClient(secrets, output);
+  const client = new PlatformClient(getToken, output);
 
   const flat = await client.getContext(`${base}/flat`);
   expect('解析扁平结构', !!flat && flat.courseTitle === 'C# Web API 实训');
