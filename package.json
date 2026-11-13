@@ -1,0 +1,303 @@
+{
+  "name": "ptn-agent",
+  "displayName": "PTN AI Coding Agent",
+  "description": "实训平台内置 VS Code 的 AI 编程学习与开发助手：代码理解、调试分析、修改预览、自定义模型。",
+  "version": "0.1.0",
+  "publisher": "ptn",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Education",
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "coding",
+    "agent",
+    "training",
+    "education"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ptnAgent",
+          "title": "AI Coding Agent",
+          "icon": "media/agent.svg"
+        }
+      ]
+    },
+    "views": {
+      "ptnAgent": [
+        {
+          "type": "webview",
+          "id": "ptnAgent.chatView",
+          "name": "代码助手"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "ptnAgent.openChat",
+        "title": "AI Agent: 打开对话",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "ptnAgent.explainSelection",
+        "title": "AI Agent: 解释选中代码"
+      },
+      {
+        "command": "ptnAgent.analyzeProblem",
+        "title": "AI Agent: 分析当前错误"
+      },
+      {
+        "command": "ptnAgent.generateTests",
+        "title": "AI Agent: 生成单元测试"
+      },
+      {
+        "command": "ptnAgent.explainProject",
+        "title": "AI Agent: 理解项目结构"
+      },
+      {
+        "command": "ptnAgent.refactorSelection",
+        "title": "AI Agent: 重构选中代码"
+      },
+      {
+        "command": "ptnAgent.settings",
+        "title": "AI Agent: 模型设置"
+      },
+      {
+        "command": "ptnAgent.testConnection",
+        "title": "AI Agent: 测试模型连接"
+      },
+      {
+        "command": "ptnAgent.newSession",
+        "title": "AI Agent: 新建会话"
+      },
+      {
+        "command": "ptnAgent.clearSession",
+        "title": "AI Agent: 清空会话"
+      },
+      {
+        "command": "ptnAgent.showContext",
+        "title": "AI Agent: 查看当前上下文"
+      },
+      {
+        "command": "ptnAgent.undoLastPatch",
+        "title": "AI Agent: 撤销上次 AI 修改"
+      },
+      {
+        "command": "ptnAgent.runTests",
+        "title": "AI Agent: 运行测试或构建"
+      },
+      {
+        "command": "ptnAgent.runCommand",
+        "title": "AI Agent: 运行命令"
+      },
+      {
+        "command": "ptnAgent.refreshPlatform",
+        "title": "AI Agent: 刷新平台上下文"
+      },
+      {
+        "command": "ptnAgent.showProjectOutline",
+        "title": "AI Agent: 查看项目结构摘要"
+      },
+      {
+        "command": "ptnAgent.checkCommand",
+        "title": "AI Agent: 命令安全自检"
+      },
+      {
+        "command": "ptnAgent.gotoProblem",
+        "title": "AI Agent: 定位问题"
+      },
+      {
+        "command": "ptnAgent.checkPi",
+        "title": "AI Agent: 检查 Pi 基座"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "ptnAgent.explainSelection",
+          "when": "editorHasSelection",
+          "group": "ptnAgent@1"
+        },
+        {
+          "command": "ptnAgent.refactorSelection",
+          "when": "editorHasSelection",
+          "group": "ptnAgent@2"
+        },
+        {
+          "command": "ptnAgent.generateTests",
+          "when": "editorHasSelection",
+          "group": "ptnAgent@3"
+        },
+        {
+          "command": "ptnAgent.analyzeProblem",
+          "group": "ptnAgent@4"
+        },
+        {
+          "command": "ptnAgent.gotoProblem",
+          "group": "ptnAgent@5"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "ptnAgent.explainSelection",
+          "when": "editorHasSelection"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "ptnAgent.openChat",
+        "key": "ctrl+alt+i",
+        "mac": "cmd+alt+i"
+      },
+      {
+        "command": "ptnAgent.explainSelection",
+        "key": "ctrl+alt+e",
+        "mac": "cmd+alt+e",
+        "when": "editorHasSelection"
+      }
+    ],
+    "configuration": {
+      "title": "PTN AI Coding Agent",
+      "properties": {
+        "ptnAgent.agentBackend": {
+          "type": "string",
+          "enum": ["native", "pi"],
+          "enumDescriptions": [
+            "直连模型接口（内置，无额外依赖）",
+            "Pi Agent 基座（内置 SDK，可调用只读工具）"
+          ],
+          "default": "native",
+          "description": "Agent 基座"
+        },
+        "ptnAgent.piTransport": {
+          "type": "string",
+          "enum": ["sdk", "rpc"],
+          "enumDescriptions": [
+            "进程内 SDK（随扩展内置，推荐）",
+            "启动 pi --mode rpc 子进程"
+          ],
+          "default": "sdk",
+          "description": "Pi 接入方式，仅在 agentBackend=pi 时生效"
+        },
+        "ptnAgent.piCommand": {
+          "type": "string",
+          "default": "pi",
+          "description": "Pi 可执行文件路径，仅在 piTransport=rpc 时使用"
+        },
+        "ptnAgent.piExtraArgs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "追加给 Pi RPC 进程的额外参数"
+        },
+        "ptnAgent.piTimeoutMs": {
+          "type": "number",
+          "default": 180000,
+          "description": "Pi 单次运行超时时间（毫秒）"
+        },
+        "ptnAgent.provider": {
+          "type": "string",
+          "enum": [
+            "deepseek",
+            "openai-compatible",
+            "ollama"
+          ],
+          "enumDescriptions": [
+            "DeepSeek 官方接口",
+            "任意 OpenAI 兼容接口",
+            "本地 Ollama"
+          ],
+          "default": "deepseek",
+          "description": "模型供应商"
+        },
+        "ptnAgent.baseUrl": {
+          "type": "string",
+          "default": "https://api.deepseek.com/v1",
+          "description": "API Base URL，需包含版本路径，例如 https://api.deepseek.com/v1"
+        },
+        "ptnAgent.model": {
+          "type": "string",
+          "default": "deepseek-chat",
+          "description": "模型名称"
+        },
+        "ptnAgent.temperature": {
+          "type": "number",
+          "default": 0.2,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "采样温度"
+        },
+        "ptnAgent.maxContextLines": {
+          "type": "number",
+          "default": 400,
+          "description": "单次发送的最大代码行数"
+        },
+        "ptnAgent.autoContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "自动附带当前文件与选区上下文"
+        },
+        "ptnAgent.requireDiffApproval": {
+          "type": "boolean",
+          "default": true,
+          "description": "代码修改必须经过 Diff 审核后才会写入"
+        },
+        "ptnAgent.platformUrl": {
+          "type": "string",
+          "default": "",
+          "description": "实训平台 API 地址，留空表示不连接平台"
+        },
+        "ptnAgent.systemPromptExtra": {
+          "type": "string",
+          "default": "",
+          "description": "追加到系统提示词的自定义内容，例如课程规范"
+        },
+        "ptnAgent.includeProjectContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "在项目类问题中附带项目结构摘要"
+        },
+        "ptnAgent.allowedCommands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "命令白名单前缀，例如 npm test、dotnet build。白名单不会跳过硬性确认"
+        },
+        "ptnAgent.commandTimeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "description": "命令执行超时时间（毫秒）"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package --no-dependencies",
+    "lint": "tsc --noEmit -p ./",
+    "check": "node scripts/check-patch.js && node scripts/check-patch-resolve.js && node scripts/check-commands.js && node scripts/check-session.js && node scripts/check-platform.js && node scripts/check-undo.js && node scripts/check-stream.js && node scripts/check-pi-sdk.js && node scripts/check-pi-rpc.js && node scripts/check-pi-custom-provider.js && node scripts/smoke.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "^1.5.2"
+  }
+}
