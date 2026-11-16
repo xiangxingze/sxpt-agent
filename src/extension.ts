@@ -6,19 +6,11 @@ import { ChangeTracker } from './changeTracker';
 import { DiffPreview } from './diffPreview';
 import { ChatController } from './chatController';
 import { ChatTerminal } from './ui/chatTerminal';
-import { ApprovalNode, ReplyNode, SessionTree } from './ui/sessionTree';
+import { ChatWebview } from './ui/chatWebview';
 import { PlatformClient, courseContextToPrompt } from './platform/client';
 import { getProjectOutline } from './project/outline';
 import { piSdkLoadError, probePiSdk } from './agent/piAgent';
 
-/**
- * 界面全部使用 VS Code 原生组件，不使用 webview：
- *  - 对话：扩展自己绘制的终端标签页（ui/chatTerminal.ts）
- *  - 侧栏：原生树视图 + 欢迎页（ui/sessionTree.ts、package.json 的 viewsWelcome）
- *  - 设置：QuickPick / InputBox（settingsController.ts）
- *  - 修改审核：原生 Diff 编辑器（diffPreview.ts）
- * 原因：webview 依赖 Service Worker，在局域网 http:// 地址（非安全上下文）下无法加载。
- */
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel('AI Coding Agent');
   const secrets = new SecretStore(context);
@@ -35,23 +27,33 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const controller = new ChatController(secrets, tracker, diffs, platform, output, statusBar, context);
 
+  let usingTerminal = false;
   const terminal = new ChatTerminal({
-    onMessage: (message) => void controller.onMessage(message),
+    onMessage: (message) => { if (usingTerminal) void controller.onMessage(message); },
     cwd: () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
     location: () => readConfig().chatLocation
   });
-  controller.attachSurface(terminal);
-
-  const tree = new SessionTree();
-  tree.register(context);
-  controller.addObserver((message) => tree.receive(message));
-
-  context.subscriptions.push(terminal, { dispose: () => controller.dispose() });
+  const view = new ChatWebview(context.extensionUri, async (message) => {
+    if (usingTerminal && (message?.type === 'ready' || message?.type === 'closed')) return;
+    usingTerminal = false;
+    controller.attachSurface(view);
+    await controller.onMessage(message);
+  }, output);
+  controller.attachSurface(view);
+  const usePanel = () => { usingTerminal = false; controller.attachSurface(view); };
+  context.subscriptions.push(terminal, view,
+    vscode.window.registerWebviewViewProvider('ptnAgent.sessionView', view, { webviewOptions: { retainContextWhenHidden: true } }),
+    { dispose: () => controller.dispose() });
 
   const register = (id: string, handler: (...args: any[]) => any) =>
     context.subscriptions.push(vscode.commands.registerCommand(id, handler));
 
-  register('ptnAgent.openChat', () => controller.reveal());
+  register('ptnAgent.openChat', async () => { usePanel(); await controller.reveal(); await controller.onMessage({ type: 'ready' }); });
+  register('ptnAgent.openTerminalChat', async () => {
+    usingTerminal = true;
+    controller.attachSurface(terminal);
+    await controller.reveal();
+  });
   register('ptnAgent.ask', () => controller.ask());
   register('ptnAgent.stop', () => controller.stop());
   register('ptnAgent.explainSelection', () => controller.runQuickAction('explain'));
@@ -61,20 +63,19 @@ export function activate(context: vscode.ExtensionContext): void {
   register('ptnAgent.fixProblems', () => controller.runQuickAction('fix'));
   register('ptnAgent.explainProject', () => controller.runQuickAction('project'));
   register('ptnAgent.newSession', () => controller.newSession());
+  register('ptnAgent.history', () => controller.openHistory());
   register('ptnAgent.undoLastPatch', () => controller.undo());
   register('ptnAgent.runTests', () => controller.runTests());
   register('ptnAgent.runCommand', () => controller.promptRunCommand());
 
-  // 设置、模型选择、连接测试都用原生的 QuickPick / InputBox 完成
   register('ptnAgent.settings', () => controller.openSettings());
   register('ptnAgent.pickModel', () => controller.pickModel());
   register('ptnAgent.pickMode', () => controller.pickApprovalMode());
 
-  // 侧栏树视图上的按钮
-  register('ptnAgent.approval.allow', (node?: ApprovalNode) => controller.resolveApproval(node?.id, 'allow'));
-  register('ptnAgent.approval.deny', (node?: ApprovalNode) => controller.resolveApproval(node?.id, 'deny'));
-  register('ptnAgent.approval.diff', (node?: ApprovalNode) => controller.openDiff(node?.id));
-  register('ptnAgent.openReply', (node?: ReplyNode) => controller.openReply(node?.turn?.reply ?? ''));
+  register('ptnAgent.approval.allow', (node?: { id: string }) => controller.resolveApproval(node?.id, 'allow'));
+  register('ptnAgent.approval.deny', (node?: { id: string }) => controller.resolveApproval(node?.id, 'deny'));
+  register('ptnAgent.approval.diff', (node?: { id: string }) => controller.openDiff(node?.id));
+  register('ptnAgent.openReply', (node?: { turn?: { reply?: string } }) => controller.openReply(node?.turn?.reply ?? ''));
 
   register('ptnAgent.checkPi', async () => {
     const sdk = await probePiSdk();

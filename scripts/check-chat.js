@@ -3,6 +3,7 @@
  * 验证界面消息协议的顺序与内容、审批往返（对话窗口 / 原生弹窗 / 侧栏按钮）、停止、
  * 修改汇总与撤销、原生设置菜单（QuickPick / InputBox）、侧栏树视图。
  */
+require('./source-loader');
 const Module = require('module');
 const path = require('path');
 const fs = require('fs');
@@ -464,7 +465,7 @@ async function main() {
       }
     });
     await t.controller.handleUserText('写 late.txt');
-    expect('ready 时同步回送 state → history → 等待中的审批', afterReady.join() === 'state,history,approval', afterReady.join());
+    expect('ready 补回历史、运行中步骤和等待中的审批', afterReady[0] === 'state' && afterReady[1] === 'history' && afterReady.includes('toolStart') && afterReady.includes('approval'), afterReady.join());
     expect('侧栏按钮：拒绝后不写入', !fs.existsSync(path.join(ws, 'late.txt')));
     server.close();
 
@@ -728,6 +729,60 @@ async function main() {
     expect('新建对话后清空', tree.getChildren().length === 0);
   }
 
+  {
+    const { server, seen } = createModelServer([{ text: '历史中的回答' }], { models: ['test-model', 'another-model'] });
+    const port = await listen(server);
+    const t = setup(port);
+    await t.send({ type: 'getSettings' });
+    const values = t.posted.find((message) => message.type === 'settingsData').values;
+    expect('表单读取不会回显 Key', values.hasKey && !('apiKey' in values));
+    await t.send({ type: 'fetchModels', requestId: 1, values: { ...values, model: '' } });
+    expect('表单从草稿地址获取模型并保留配置', t.posted.at(-1).ok && t.posted.at(-1).models.includes('another-model') && configValues.model === 'test-model');
+    await t.send({ type: 'testConnection', requestId: 2, values });
+    expect('表单测试连接沿用已保存的 Key', t.posted.at(-1).ok);
+    await t.send({ type: 'saveSettings', requestId: 3, values: { ...values, contextWindow: 1 } });
+    expect('表单先验证全部字段，错误时不保存', !t.posted.at(-1).ok && configValues.contextWindow === undefined);
+    await t.send({ type: 'saveSettings', requestId: 4, values: { ...values, model: 'another-model', apiKey: 'form-secret' } });
+    expect('表单保存模型和安全存储 Key', t.posted.at(-1).ok && configValues.model === 'another-model' && t.getKey() === 'form-secret');
+    expect('表单保存结果不回传 Key', !JSON.stringify(t.posted).includes('form-secret'));
+    await t.controller.handleUserText('第一条会话的问题');
+    await t.send({ type: 'listSessions' });
+    const firstId = t.posted.at(-1).activeId;
+    await t.send({ type: 'newSession', draft: '第一条的未发送草稿' });
+    await t.controller.handleUserText('第二条会话的问题');
+    await t.send({ type: 'selectSession', id: firstId, draft: '第二条的草稿' });
+    const restored = [...t.posted].reverse().find((message) => message.type === 'history');
+    expect('真实会话切换恢复消息和草稿', restored.messages[0].content === '第一条会话的问题' && restored.draft === '第一条的未发送草稿');
+    const secondServer = createModelServer([{ text: 'pong' }], { models: ['local-model'] });
+    const secondPort = await listen(secondServer.server);
+    const changed = { ...values, baseUrl: `http://127.0.0.1:${secondPort}/v1` };
+    await t.send({ type: 'fetchModels', requestId: 5, values: changed });
+    expect('变更 API 地址不会把旧 Key 发送到新服务', secondServer.seen.listAuth === undefined);
+    await t.send({ type: 'saveSettings', requestId: 6, values: changed });
+    expect('更换地址必须明确提供 Key 或清除旧 Key', !t.posted.at(-1).ok && t.getKey() === 'form-secret');
+    await t.send({ type: 'saveSettings', requestId: 7, values: { ...changed, clearKey: true } });
+    expect('本地模型可明确清除 Key 后保存', t.posted.at(-1).ok && !t.getKey());
+    expect('表单连接测试确实调用模型接口', seen.length >= 3);
+    server.close(); secondServer.server.close(); t.controller.dispose();
+  }
+  {
+    const { server } = createModelServer([
+      { tool: 'write', args: { path: 'switching.txt', content: 'must not be written' } },
+      { text: '已停止' }
+    ]);
+    const port = await listen(server);
+    let transition;
+    const t = setup(port, { onApproval: (_message, self) => { transition = self.send({ type: 'newSession', draft: '旧任务草稿' }); } });
+    await t.controller.handleUserText('运行中切换会话');
+    await transition;
+    await t.send({ type: 'listSessions' });
+    const history = t.posted.at(-1);
+    expect('新建会话先收尾旧任务且不会执行待审批写入', !fs.existsSync(path.join(ws, 'switching.txt')) && t.controller.sessionMessageCount === 0);
+    await t.send({ type: 'selectSession', id: history.sessions[0].id });
+    const restored = [...t.posted].reverse().find((message) => message.type === 'history');
+    expect('被停止的旧任务仍保存在原会话', restored.messages[0].content === '运行中切换会话' && restored.messages.length === 2);
+    server.close(); t.controller.dispose();
+  }
   fs.rmSync(ws, { recursive: true, force: true });
   fs.rmSync(storage, { recursive: true, force: true });
   if (fail > 0) {

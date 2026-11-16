@@ -1,5 +1,7 @@
+require('./source-loader');
 const Module = require('module');
 const path = require('path');
+const fs = require('node:fs/promises');
 
 const disposables = [];
 const commands = new Map();
@@ -7,6 +9,7 @@ const channels = [];
 const treeViews = [];
 const terminals = [];
 const linkProviders = [];
+const webviews = [];
 
 function disposable(fn) {
   return { dispose: fn || (() => {}) };
@@ -63,6 +66,7 @@ const stub = {
     joinPath: (base, ...parts) => stub.Uri.file(path.join(base.fsPath || base.path, ...parts))
   },
   window: {
+    registerWebviewViewProvider: (id, provider, options) => { webviews.push({ id, provider, options }); return disposable(); },
     createOutputChannel: (name) => {
       const ch = { appendLine: () => {}, show: () => {}, dispose: () => {}, name };
       channels.push(ch);
@@ -127,7 +131,7 @@ const stub = {
     asRelativePath: (p) => p,
     openTextDocument: async () => ({ getText: () => '', lineCount: 1, lineAt: () => ({ text: '' }), positionAt: () => ({}) }),
     applyEdit: async () => true,
-    fs: { writeFile: async () => {} }
+    fs: { writeFile: async () => {}, readFile: (uri) => fs.readFile(uri.fsPath) }
   },
   commands: {
     registerCommand: (id, handler) => {
@@ -227,18 +231,40 @@ async function main() {
     process.exitCode = 1;
   }
 
-  // 原生界面：侧栏树视图 + 终端对话窗口，不再使用 webview
+  // 主面板使用 Webview，原生终端作为备用入口。
   const check = (name, cond) => {
     if (!cond) {
       console.error('FAIL ' + name);
       process.exitCode = 1;
     }
   };
-  check('注册了侧栏树视图', treeViews.length === 1 && treeViews[0].id === 'ptnAgent.sessionView');
+  check('注册了统一 Webview 面板', webviews.length === 1 && webviews[0].id === 'ptnAgent.sessionView' && treeViews.length === 0);
   check('注册了终端链接（文件:行号）', linkProviders.length === 1);
   check('激活时不创建对话终端', terminals.length === 0);
 
   await commands.get('ptnAgent.openChat')();
+  check('默认对话不会创建备用终端', terminals.length === 0);
+  const posted = [];
+  let receive;
+  let disposeView;
+  const panel = { visible: true, show() {},
+    onDidDispose: (handler) => { disposeView = handler; return disposable(); },
+    webview: { cspSource: 'https://test.webview.local',
+      asWebviewUri: (uri) => ({ toString: () => 'https://test.webview.local/' + path.basename(uri.fsPath) }),
+      onDidReceiveMessage: (handler) => { receive = handler; return disposable(); },
+      postMessage: async (message) => { posted.push(message); return true; }
+    }
+  };
+  await webviews[0].provider.openSettings();
+  await webviews[0].provider.resolveWebviewView(panel);
+  check('实际 HTML 已注入 CSP 与本地资源地址', !panel.webview.html.includes('{{') && panel.webview.html.includes("default-src 'none'") && panel.webview.html.includes('https://test.webview.local/chat.js'));
+  check('只允许加载 media 目录资源', panel.webview.options.enableScripts && panel.webview.options.localResourceRoots[0].fsPath === path.join(__dirname, '..', 'media'));
+  await receive({ type: 'ready' });
+  check('加载完成补发状态、历史与待打开设置页', posted.some((m) => m.type === 'state') && posted.some((m) => m.type === 'history') && posted.at(-1).panel === 'settings');
+  check('可见且完成加载的面板可以审批', webviews[0].provider.canApprove);
+  disposeView();
+  check('面板销毁后关闭内嵌审批入口', !webviews[0].provider.canApprove);
+  await commands.get('ptnAgent.openTerminalChat')();
   const term = terminals[0];
   check('打开对话会创建一个终端标签页', terminals.length === 1 && term.name === 'AI Agent' && term.options.pty && term.shown === 1);
   check('对话终端默认放在编辑器右侧', term && term.options.location && term.options.location.viewColumn === stub.ViewColumn.Beside);
@@ -252,7 +278,7 @@ async function main() {
     linkProviders[0].provideTerminalLinks({ terminal: term, line: '见 src/a.ts:12' }).length === 1 &&
       linkProviders[0].provideTerminalLinks({ terminal: {}, line: '见 src/a.ts:12' }).length === 0
   );
-  await commands.get('ptnAgent.openChat')();
+  await commands.get('ptnAgent.openTerminalChat')();
   check('再次打开复用同一个终端', terminals.length === 1 && term.shown === 2);
   term.options.pty.close();
 

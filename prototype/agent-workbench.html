@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VS Code · AI Agent 扩展原型</title>
+  <style>
+    :root { color-scheme: dark; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; font-size: 13px; color: #ccc; background: #181818; --border: #303030; --muted: #999; --blue: #0078d4; }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0; }
+    button, input, select, textarea { font: inherit; color: inherit; }
+    button { cursor: pointer; }
+    button:focus-visible, select:focus-visible, summary:focus-visible { outline: 1px solid #3794ff; outline-offset: 2px; }
+    .preview-bar { min-height: 46px; padding: 8px 16px; display: flex; align-items: center; gap: 14px; background: #101010; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+    .preview-bar strong { color: #eee; font-size: 12px; }
+    .preview-bar span { color: var(--muted); font-size: 12px; }
+    .preview-bar label { margin-left: auto; font-size: 12px; display: flex; gap: 8px; align-items: center; }
+    .preview-bar select { width: auto; height: 28px; padding: 0 8px; }
+    .window { height: calc(100dvh - 46px); min-height: 520px; display: grid; grid-template-rows: 35px minmax(0, 1fr) 23px; }
+    .titlebar { display: flex; align-items: center; padding: 0 14px; gap: 18px; font-size: 12px; border-bottom: 1px solid var(--border); }
+    .window-title { margin: auto; color: #aaa; }
+    .workspace { min-height: 0; display: grid; grid-template-columns: 48px 175px minmax(180px, 1fr) minmax(350px, 410px); }
+    .activity { border-right: 1px solid var(--border); display: flex; flex-direction: column; align-items: center; gap: 22px; padding-top: 15px; font-size: 22px; color: #888; }
+    .active-icon { color: #eee; border-left: 2px solid #eee; width: 100%; text-align: center; }
+    .explorer { padding: 14px 12px; background: #181818; border-right: 1px solid var(--border); font-size: 12px; line-height: 2.2; }
+    .explorer header { color: #bbb; margin-bottom: 16px; letter-spacing: .5px; }
+    .tree { color: #aaa; white-space: pre-line; }
+    .editor { min-width: 0; background: #1f1f1f; overflow: auto; }
+    .editor-tab { height: 36px; display: flex; align-items: center; padding: 0 16px; width: fit-content; background: #1f1f1f; border-top: 1px solid #0078d4; border-right: 1px solid var(--border); }
+    .breadcrumbs { padding: 9px 20px; color: #999; font-size: 12px; }
+    pre { margin: 16px 0; padding: 0 22px; font: 13px/1.9 Consolas, monospace; color: #c5d5e5; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .line-number { color: #777; margin-right: 20px; user-select: none; }
+    .keyword { color: #c586c0; } .string { color: #ce9178; } .comment { color: #6a9955; }
+    .editor-note { padding: 18px 22px; margin-top: 35px; border-top: 1px solid var(--border); color: #888; line-height: 1.8; font-size: 12px; }
+    .diff { padding: 16px; } .diff h3 { margin: 0 0 12px; font-size: 13px; } .diff pre { padding: 12px; margin: 0; } .removed { background: #4b2225; color: #f3b5b8; } .added { background: #203b28; color: #a8d7b4; }
+    .agent { position: relative; min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; border-left: 1px solid #303033; background: #19191b; color: #dedee2; }
+    .agent-header { height: 48px; flex: none; padding: 0 12px 0 20px; display: flex; align-items: center; gap: 3px; }
+    .agent-header strong { font-size: 12px; font-weight: 600; letter-spacing: .4px; margin-right: auto; color: #e9e9ec; }
+    .icon { height: 30px; min-width: 30px; border: 0; background: transparent; border-radius: 7px; color: #a0a0a8; font-size: 18px; transition: background .16s, color .16s; }
+    .icon svg { display: block; margin: auto; width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+    .icon:hover, .icon[aria-expanded="true"] { background: #2b2b30; color: #f1f1f3; }
+    .agent-scroll { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow-y: auto; padding: 8px 22px 20px; scrollbar-width: thin; scrollbar-color: #3a3a40 transparent; }
+    .dot { width: 5px; height: 5px; border-radius: 50%; background: #8fbca3; flex: none; }
+    .dot.off { background: #cca700; }
+    .thread-title { flex: none; margin: 4px 0 20px; color: #8d8d97; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .panel { position: absolute; inset: 48px 0 0; z-index: 2; display: flex; flex-direction: column; background: #19191b; opacity: 0; visibility: hidden; transform: translateX(14px); transition: opacity .18s ease, transform .22s ease, visibility .22s; pointer-events: none; }
+    .agent[data-view="history"] .history, .agent[data-view="settings"] .settings-panel { opacity: 1; visibility: visible; transform: translateX(0); pointer-events: auto; }
+    .agent-scroll, .composer-area { transition: opacity .18s ease, transform .22s ease; }
+    .agent:not([data-view="chat"]) > .agent-scroll, .agent:not([data-view="chat"]) > .composer-area { opacity: 0; transform: translateX(-8px); pointer-events: none; }
+    .panel-heading { display: flex; align-items: center; gap: 8px; padding: 12px 16px 16px; border-bottom: 1px solid #2b2b30; }
+    .history { padding: 0 0 18px; }
+    .history > p { margin: 18px 24px 12px; }
+    .history-list { overflow-y: auto; min-height: 0; }
+    .session-item { display: flex; width: calc(100% - 28px); margin: 2px 14px; gap: 12px; align-items: center; padding: 14px 12px; text-align: left; background: transparent; border: 0; border-radius: 8px; }
+    .session-item:hover, .session-item[aria-current="true"] { background: #27272c; }
+    .session-item span { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; }
+    .session-item small { color: #888; font-size: 10px; white-space: nowrap; }
+    .settings { display: flex; flex-direction: column; flex: 1; min-height: 0; margin: 0; }
+    .settings-body { flex: 1; min-height: 0; overflow-y: auto; padding: 26px 24px; scrollbar-width: thin; scrollbar-color: #3a3a40 transparent; }
+    .section-label { margin: 0 0 8px; font-size: 15px; font-weight: 600; color: #ececef; }
+    .section-description { margin: 0 0 28px; }
+    h2 { font-size: 13px; margin: 0; color: #eee; font-weight: 600; }
+    .muted { color: #92929d; font-size: 12px; line-height: 1.75; }
+    .field { margin-bottom: 24px; }
+    .field label { display: block; margin-bottom: 9px; font-size: 12px; color: #d3d3da; }
+    input, select { width: 100%; height: 38px; padding: 6px 11px; background: #232327; border: 1px solid #38383f; border-radius: 7px; outline: none; transition: border-color .16s, box-shadow .16s; }
+    input::placeholder, textarea::placeholder { color: #74747f; }
+    input:focus, select:focus { border-color: #8c8c9b; box-shadow: 0 0 0 2px #ffffff08; }
+    .field small { display: block; font-size: 11px; color: #83838f; margin-top: 8px; line-height: 1.7; }
+    .label-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+    .label-row label { margin-bottom: 9px; }
+    .label-row span { font-size: 10px; color: #8fbca3; }
+    .row { display: flex; align-items: center; gap: 7px; }
+    .row input { min-width: 0; }
+    .secondary, .primary { min-height: 36px; padding: 8px 12px; border-radius: 7px; border: 1px solid transparent; font-size: 12px; white-space: nowrap; transition: background .16s; }
+    .secondary { background: #28282e; color: #d9d9e0; border-color: #3a3a42; } .secondary:hover { background: #34343c; }
+    .primary { color: #222226; background: #ececef; font-weight: 600; } .primary:hover { background: #fff; }
+    button:disabled { opacity: .5; cursor: wait; }
+    details { font-size: 12px; color: #aaaab4; border-top: 1px solid #2c2c32; }
+    summary { cursor: pointer; padding: 17px 0; }
+    details .field { margin-top: 6px; }
+    .settings-actions { flex: none; padding: 16px 24px 20px; border-top: 1px solid #2c2c32; background: #19191b; }
+    .settings-actions > .row { justify-content: space-between; }
+    .result { margin: 12px 0 0; font-size: 11px; color: #9bc4ac; line-height: 1.6; min-height: 18px; }
+    .welcome { margin: auto 0; padding: 40px 0 56px; text-align: center; }
+    .spark { color: #dadade; font-size: 28px; margin-bottom: 22px; }
+    .welcome h1 { font-size: 21px; line-height: 1.5; margin: 0 0 10px; font-weight: 550; letter-spacing: -.6px; color: #eeeef1; }
+    .welcome p { margin: 0 0 28px; font-size: 12px; }
+    .suggestions { display: flex; flex-direction: column; gap: 8px; align-items: center; }
+    .suggestions button { background: transparent; color: #a5a5b0; border: 1px solid #33333b; padding: 8px 14px; border-radius: 20px; text-align: left; font-size: 11px; transition: color .16s, background .16s, border-color .16s; }
+    .suggestions button:hover { color: #eeeef1; background: #25252c; border-color: #50505b; }
+    .messages { display: flex; flex-direction: column; gap: 20px; padding: 12px 0; }
+    .thread { display: flex; flex-direction: column; gap: 20px; }
+    .message { font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
+    .message.user { align-self: flex-end; max-width: 92%; padding: 11px 15px; border-radius: 14px 14px 4px 14px; background: #2a2a31; white-space: pre-wrap; }
+    .message.assistant { color: #ccc; }
+    .message strong { display: block; font-size: 12px; color: #eee; margin-bottom: 6px; }
+    .approval { padding: 12px; background: #242320; border: 1px solid #63552e; border-radius: 6px; margin-top: 12px; }
+    .approval .row { flex-wrap: wrap; margin-top: 10px; }
+    .composer-area { flex: none; padding: 12px 16px 14px; background: #19191b; }
+    .context { width: fit-content; font-size: 10px; color: #a0a0ab; margin: 0 0 9px 3px; padding: 5px 8px; border: 1px solid #323239; border-radius: 5px; }
+    .composer { padding: 12px 12px 10px; border: 1px solid #44444e; background: #242429; border-radius: 14px; box-shadow: 0 5px 20px #00000016; transition: border-color .16s, box-shadow .16s; }
+    .composer:focus-within { border-color: #777785; box-shadow: 0 5px 20px #00000024; }
+    textarea { display: block; width: 100%; resize: none; height: 70px; background: transparent; border: 0; outline: none; font-size: 13px; line-height: 1.7; padding: 2px; }
+    .composer-tools { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
+    .composer-tools span { font-size: 11px; color: #aaa; }
+    .model-state { display: flex; align-items: center; gap: 7px; }
+    .send { height: 28px; width: 28px; font-size: 18px; border: 0; border-radius: 50%; color: #26262b; background: #ededf0; transition: background .16s, transform .16s; }
+    .send:hover { background: #fff; transform: translateY(-1px); }
+    .footnote { margin-top: 10px; text-align: center; font-size: 10px; color: #777782; }
+    .saved-notice { position: absolute; bottom: 190px; align-self: center; padding: 8px 14px; background: #303038; border: 1px solid #464650; border-radius: 8px; color: #dcdce3; font-size: 11px; box-shadow: 0 6px 22px #0003; pointer-events: none; opacity: 0; transform: translateY(5px); transition: opacity .18s, transform .18s; }
+    .saved-notice.visible { opacity: 1; transform: translateY(0); }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }
+    .statusbar { padding: 3px 12px; display: flex; justify-content: space-between; background: #0078d4; color: white; font-size: 11px; }
+    @media (max-width: 1050px) { .workspace { grid-template-columns: 48px minmax(180px, 1fr) minmax(330px, 400px); } .explorer { display: none; } }
+    @media (max-width: 700px) { .workspace { grid-template-columns: 42px minmax(0, 1fr); } .editor { display: none; } .window-title { margin: 0 0 0 auto; } .menu { display: none; } .preview-bar span { display: none; } .preview-bar { gap: 5px; } .preview-bar label { margin-left: 0; } }
+  </style>
+</head>
+<body>
+  <div class="preview-bar">
+    <strong>VS Code 扩展原型 · V4</strong><span>简洁对话 · 面板内设置切换 · 模拟数据</span>
+    <label for="scenario">预览场景 <select id="scenario"><option value="chat">日常对话</option><option value="setup">首次配置</option><option value="approval">修改确认</option></select></label>
+  </div>
+  <div class="window">
+    <div class="titlebar"><span>◈</span><span class="menu">文件　 编辑　 查看　 运行　 终端　 帮助</span><span class="window-title">training-project — Visual Studio Code</span><span>─　□　×</span></div>
+    <div class="workspace">
+      <aside class="activity" aria-label="VS Code 活动栏示意"><span>▱</span><span>⌕</span><span>⑂</span><span class="active-icon">✦</span></aside>
+      <aside class="explorer"><header>资源管理器</header><b>⌄ TRAINING-PROJECT</b><div class="tree">　⌄ src
+        　⌄ services
+        　　userService.ts
+        　 app.ts
+       　 package.json
+       　 README.md</div></aside>
+      <section class="editor" aria-label="VS Code 代码编辑区示意">
+        <div class="editor-tab" id="editorTab">TS　 userService.ts　 ×</div>
+        <div class="breadcrumbs">src　›　services　›　userService.ts</div>
+        <div id="sourceCode"><pre><span class="line-number">1</span><span class="keyword">export async function</span> getUser(id: string) {
+<span class="line-number">2</span>  <span class="keyword">const</span> response = <span class="keyword">await</span> fetch(
+<span class="line-number">3</span>    <span class="string">`/api/users/${id}`</span>
+<span class="line-number">4</span>  );
+<span class="line-number">5</span>  <span class="keyword">return</span> response.json();
+<span class="line-number">6</span>}
+<span class="line-number">7</span>
+<span class="line-number">8</span><span class="comment">// 在旁边的 Agent 面板描述任务</span></pre></div>
+        <div class="diff" id="diffView" hidden><h3>userService.ts · 修改预览（模拟）</h3><pre class="removed">- return response.json();</pre><pre class="added">+ if (!response.ok) {
++   throw new Error('获取用户信息失败');
++ }
++ return response.json();</pre></div>
+        <div class="editor-note">原型展示扩展在 VS Code 中的使用场景。<br>右侧为唯一的 Agent 操作面板；查看代码和修改差异时继续使用编辑区。</div>
+      </section>
+      <section class="agent" id="agent" data-view="chat" aria-label="AI Agent 扩展面板">
+        <header class="agent-header"><strong>AI Agent</strong><button class="icon" id="newChat" title="新建会话" aria-label="新建会话"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M11 4H4v12h12V9M11 9l6-6M13 3h4v4"/></svg></button><button class="icon" id="toggleHistory" title="历史记录" aria-label="历史记录" aria-expanded="false"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 9a7 7 0 1 1 2 6M3 4v5h5M10 6v4l3 2"/></svg></button><button class="icon" id="toggleSettings" title="设置" aria-label="设置" aria-expanded="false"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8 3h4l.5 2 1.5 1 2-.5 2 3-1.5 1.5v2L18 13.5l-2 3-2-.5-1.5 1-.5 2H8l-.5-2L6 16l-2 .5-2-3L3.5 12v-2L2 8.5l2-3L6 6l1.5-1z" transform="translate(1 0) scale(.9)"/><circle cx="10" cy="10" r="2.6"/></svg></button></header>
+        <section class="panel history" id="historyPanel" aria-label="历史会话" aria-hidden="true" inert><div class="panel-heading"><button class="icon" id="closeHistory" aria-label="返回当前会话" title="返回当前会话">‹</button><h2>历史会话</h2></div><p class="muted">继续之前的工作</p><div class="history-list" id="historyList"></div></section>
+        <section class="panel settings-panel" id="settingsPanel" aria-label="设置" aria-hidden="true" inert>
+          <div class="panel-heading"><button class="icon" type="button" id="closeSettings" aria-label="返回对话" title="返回对话">‹</button><h2>设置</h2></div>
+          <form class="settings" id="settingsForm">
+            <div class="settings-body">
+            <p class="section-label">模型服务</p>
+            <p class="muted section-description">连接你使用的模型，保存后即可开始对话。</p>
+            <div class="field"><label for="apiUrl">API 地址</label><input id="apiUrl" type="url" placeholder="https://api.example.com/v1" required autocomplete="off"><small>包含版本路径；局域网地址可使用 http://。</small></div>
+            <div class="field"><div class="label-row"><label for="apiKey">API Key</label><span id="keyState"></span></div><input id="apiKey" type="password" placeholder="输入 Key，本地模型可留空" autocomplete="off"><small>已保存的 Key 无需重复填写。</small></div>
+            <div class="field"><label for="model">模型</label><div class="row"><input id="model" list="modelList" placeholder="选择或输入模型名称" required autocomplete="off"><button class="secondary" type="button" id="fetchModels">获取模型</button></div><datalist id="modelList"></datalist><small>从填写的 API 获取，也可以手动输入。</small></div>
+            <details><summary>高级设置</summary><div class="field"><label for="approvalMode">操作确认</label><select id="approvalMode"><option value="ask">每次操作前确认（推荐）</option><option value="autoEdit">自动修改文件，命令仍需确认</option><option value="readOnly">只查看和解释代码</option></select></div></details>
+            </div>
+            <div class="settings-actions"><div class="row"><button class="secondary" type="button" id="testConnection">测试连接</button><button class="primary" type="submit">保存设置</button></div><p class="result" id="formResult" role="status">支持 OpenAI 兼容接口</p></div>
+          </form>
+        </section>
+        <div class="agent-scroll" id="scrollArea">
+          <div class="thread-title" id="threadTitle" hidden>新会话</div>
+          <div class="welcome" id="welcome"><div class="spark">✦</div><h1>有什么想一起完成的？</h1><p class="muted">从一个问题，或一个想法开始。</p><div class="suggestions"><button data-prompt="帮我理解这个项目的结构">了解这个项目　↗</button><button data-prompt="帮我分析当前的报错，先说明原因">分析当前报错　↗</button></div></div>
+          <div class="messages" id="messages" aria-live="polite"></div>
+        </div>
+        <footer class="composer-area" id="composerArea"><div class="context">▧　userService.ts</div><div class="composer"><textarea id="messageInput" aria-label="任务描述" placeholder="提问、修改代码，或描述你的想法…"></textarea><div class="composer-tools"><span class="model-state"><span class="dot" id="connectionDot"></span><span id="composerModel">deepseek-chat</span></span><button class="send" id="sendMessage" title="发送（Enter）" aria-label="发送">↑</button></div></div><div class="footnote" id="footnote">Enter 发送 · Shift + Enter 换行 · 修改前会请你确认</div></footer>
+        <div class="saved-notice" id="savedNotice" role="status">✓ 设置已保存</div>
+      </section>
+    </div>
+    <footer class="statusbar"><span>⑂ main　　⊗ 0　△ 0</span><span>UTF-8　　TypeScript　　AI Agent</span></footer>
+  </div>
+  <script>
+    const byId = (id) => document.getElementById(id);
+    let configured = true;
+    let saved = { url: 'https://api.example.com/v1', model: 'deepseek-chat', mode: 'ask', hasKey: true };
+    const sessions = [];
+    let currentSession;
+    let sequence = 0;
+    let settingsInitialized = false;
+    let noticeTimer;
+
+    function createSession(title = '新会话', stamp = '刚刚') {
+      const content = document.createElement('div');
+      content.className = 'thread';
+      const session = { title, stamp, content, draft: '', busy: false, timer: undefined, order: ++sequence };
+      sessions.push(session);
+      return session;
+    }
+    function renderSessionLists() {
+      const recent = sessions.filter((session) => session.content.children.length).sort((first, second) => second.order - first.order);
+      byId('historyList').replaceChildren();
+      if (!recent.length) {
+        const empty = document.createElement('p');
+        empty.className = 'muted';
+        empty.textContent = '还没有历史会话。发送第一条消息后会显示在这里。';
+        byId('historyList').append(empty);
+      }
+      for (const session of recent) {
+        const button = document.createElement('button');
+        button.className = 'session-item';
+        button.setAttribute('aria-current', String(session === currentSession));
+        const title = document.createElement('span');
+        title.textContent = session.title;
+        const stamp = document.createElement('small');
+        stamp.textContent = session.busy ? '生成中…' : session.stamp;
+        button.append(title, stamp);
+        button.onclick = () => activateSession(session);
+        byId('historyList').append(button);
+      }
+    }
+    function setView(view) {
+      const panels = [['settingsPanel', 'settings'], ['historyPanel', 'history'], ['scrollArea', 'chat'], ['composerArea', 'chat']];
+      for (const [id, name] of panels) {
+        byId(id).inert = view !== name;
+        byId(id).setAttribute('aria-hidden', String(view !== name));
+      }
+      byId('agent').dataset.view = view;
+      byId('toggleSettings').setAttribute('aria-expanded', String(view === 'settings'));
+      byId('toggleHistory').setAttribute('aria-expanded', String(view === 'history'));
+    }
+    function showHistory(visible) {
+      setView(visible ? 'history' : 'chat');
+      if (visible) { renderSessionLists(); byId('closeHistory').focus(); }
+    }
+    function activateSession(session) {
+      if (currentSession) currentSession.draft = byId('messageInput').value;
+      currentSession = session;
+      byId('messages').replaceChildren(session.content);
+      byId('messageInput').value = session.draft;
+      byId('welcome').hidden = !!session.content.children.length;
+      byId('threadTitle').textContent = session.title;
+      byId('threadTitle').hidden = !session.content.children.length;
+      showHistory(false);
+      showSettings(false);
+      updateSendButton();
+      resetEditor();
+      renderSessionLists();
+      scrollToLatest();
+    }
+
+    function updateConnection() {
+      byId('connectionDot').classList.toggle('off', !configured);
+      byId('composerModel').textContent = configured ? saved.model : '请先配置模型';
+      byId('keyState').textContent = saved.hasKey ? '已保存' : '未填写';
+      byId('footnote').textContent = saved.mode === 'readOnly' ? 'Enter 发送 · Shift + Enter 换行 · 当前为只读模式' : saved.mode === 'autoEdit' ? 'Enter 发送 · Shift + Enter 换行 · 运行命令前会请你确认' : 'Enter 发送 · Shift + Enter 换行 · 修改前会请你确认';
+    }
+    function showSettings(visible) {
+      setView(visible ? 'settings' : 'chat');
+      if (visible && !settingsInitialized) {
+        byId('apiUrl').value = saved.url;
+        byId('model').value = saved.model;
+        byId('approvalMode').value = saved.mode;
+        byId('apiKey').value = '';
+        byId('formResult').textContent = '支持 OpenAI 兼容接口';
+        settingsInitialized = true;
+      }
+      if (visible) byId('closeSettings').focus();
+    }
+    function addMessage(kind, text, session = currentSession) {
+      if (session === currentSession) { byId('welcome').hidden = true; byId('threadTitle').hidden = false; }
+      const message = document.createElement('div');
+      message.className = `message ${kind}`;
+      if (kind === 'assistant') {
+        const label = document.createElement('strong');
+        label.textContent = '✦ AI Agent';
+        message.append(label);
+      }
+      const content = document.createElement('div');
+      content.textContent = text;
+      message.append(content);
+      session.content.append(message);
+      session.order = ++sequence;
+      renderSessionLists();
+      return message;
+    }
+    function scrollToLatest() { if (byId('agent').dataset.view === 'chat') byId('scrollArea').scrollTop = byId('scrollArea').scrollHeight; }
+    function updateSendButton() {
+      const value = currentSession.busy;
+      byId('sendMessage').textContent = value ? '■' : '↑';
+      byId('sendMessage').setAttribute('aria-label', value ? '停止生成' : '发送');
+      byId('sendMessage').title = value ? '停止生成' : '发送（Enter）';
+    }
+    function showApproval() {
+      const message = addMessage('assistant', '建议为当前函数补充响应失败时的错误处理。下面是准备进行的修改。');
+      const approval = document.createElement('div');
+      approval.className = 'approval';
+      approval.innerHTML = '<b>等待你确认</b><div class="muted">修改 src/services/userService.ts<br>增加错误检查，避免请求失败后继续处理数据。</div><div class="row"><button class="secondary" data-action="diff">查看修改</button><button class="primary" data-action="allow">允许修改</button><button class="secondary" data-action="deny">暂不修改</button></div>';
+      approval.addEventListener('click', (event) => {
+        const action = event.target.dataset.action;
+        if (action === 'diff') {
+          byId('sourceCode').hidden = true;
+          byId('diffView').hidden = false;
+          byId('editorTab').textContent = 'userService.ts · 修改预览';
+          if (window.innerWidth <= 700) approval.querySelector('.muted').textContent = '差异预览（模拟）：在 response.json() 前增加 response.ok 检查，请求失败时抛出错误。';
+        }
+        if (action === 'allow' || action === 'deny') {
+          approval.textContent = action === 'allow' ? '✓ 已允许（演示）。正式使用时在此处应用修改。' : '已暂缓修改。你可以继续对话，告诉我希望调整的地方。';
+          scrollToLatest();
+        }
+      });
+      message.append(approval);
+      scrollToLatest();
+    }
+    function resetEditor() {
+      byId('diffView').hidden = true;
+      byId('sourceCode').hidden = false;
+      byId('editorTab').textContent = 'TS　 userService.ts　 ×';
+    }
+    byId('toggleSettings').onclick = () => showSettings(byId('agent').dataset.view !== 'settings');
+    byId('closeSettings').onclick = () => { showSettings(false); byId('toggleSettings').focus(); };
+    byId('toggleHistory').onclick = () => showHistory(byId('agent').dataset.view !== 'history');
+    byId('closeHistory').onclick = () => { showHistory(false); byId('toggleHistory').focus(); };
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && byId('agent').dataset.view !== 'chat') {
+        const button = byId('agent').dataset.view === 'settings' ? 'toggleSettings' : 'toggleHistory';
+        setView('chat');
+        byId(button).focus();
+      }
+    });
+    byId('newChat').onclick = () => {
+      const empty = sessions.find((session) => !session.content.children.length && !session.draft.trim() && (session !== currentSession || !byId('messageInput').value.trim()));
+      activateSession(empty || createSession());
+      byId('messageInput').focus();
+    };
+    byId('fetchModels').onclick = () => {
+      byId('modelList').replaceChildren();
+      for (const name of ['deepseek-chat', 'qwen2.5-coder']) {
+        const option = document.createElement('option');
+        option.value = name;
+        byId('modelList').append(option);
+      }
+      byId('formResult').textContent = '已载入两个演示模型，可在输入框选择或手动填写。';
+      byId('model').focus();
+    };
+    byId('testConnection').onclick = () => {
+      if (!byId('settingsForm').reportValidity()) return;
+      byId('formResult').textContent = '演示：连接成功。此原型没有发送 API 请求。';
+    };
+    byId('settingsForm').onsubmit = (event) => {
+      event.preventDefault();
+      const model = byId('model').value.trim();
+      if (!model) { byId('formResult').textContent = '请填写模型名称。'; return; }
+      saved = { url: byId('apiUrl').value.trim(), model, mode: byId('approvalMode').value, hasKey: !!byId('apiKey').value.trim() || saved.hasKey };
+      configured = true;
+      byId('apiKey').value = '';
+      updateConnection();
+      showSettings(false);
+      byId('messageInput').focus();
+      byId('savedNotice').classList.add('visible');
+      clearTimeout(noticeTimer);
+      noticeTimer = setTimeout(() => byId('savedNotice').classList.remove('visible'), 1800);
+    };
+    document.querySelectorAll('[data-prompt]').forEach((button) => {
+      button.onclick = () => { byId('messageInput').value = button.dataset.prompt; byId('messageInput').focus(); };
+    });
+    function send() {
+      const session = currentSession;
+      if (session.busy) { clearTimeout(session.timer); session.busy = false; updateSendButton(); addMessage('assistant', '已停止。你可以调整要求后继续。'); scrollToLatest(); return; }
+      if (!configured) { showSettings(true); byId('apiUrl').focus(); return; }
+      const text = byId('messageInput').value.trim();
+      if (!text) return;
+      if (!session.content.children.length) session.title = text.slice(0, 36);
+      byId('threadTitle').textContent = session.title;
+      addMessage('user', text);
+      byId('messageInput').value = '';
+      session.draft = '';
+      session.busy = true;
+      updateSendButton();
+      renderSessionLists();
+      scrollToLatest();
+      session.timer = setTimeout(() => {
+        session.busy = false;
+        addMessage('assistant', '这是对话效果演示。正式使用时，我会阅读当前项目，说明发现的问题和下一步建议。你可以继续用自然语言补充要求。', session);
+        if (session === currentSession) { updateSendButton(); scrollToLatest(); }
+      }, 1200);
+    }
+    byId('sendMessage').onclick = send;
+    byId('messageInput').oninput = () => { currentSession.draft = byId('messageInput').value; };
+    byId('messageInput').onkeydown = (event) => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); if (!currentSession.busy) send(); } };
+    byId('scenario').onchange = (event) => {
+      activateSession(createSession());
+      const setup = event.target.value === 'setup';
+      configured = !setup;
+      saved = { url: setup ? '' : 'https://api.example.com/v1', model: setup ? '' : 'deepseek-chat', mode: 'ask', hasKey: !setup };
+      settingsInitialized = false;
+      updateConnection();
+      showSettings(setup);
+      if (event.target.value === 'approval') { addMessage('user', '给当前函数补充错误处理'); showApproval(); }
+    };
+    const examples = [
+      ['了解项目结构', '演示 · 昨天', '帮我梳理一下这个项目的结构', '项目主要分为服务、工具与界面三部分，可以从 src 目录开始阅读。'],
+      ['分析接口请求失败', '演示 · 今天', '为什么获取用户信息会失败？', '可以先检查请求状态和错误响应，再确认接口地址与参数。'],
+      ['给当前函数补充错误处理', '演示 · 今天', '给当前函数补充错误处理', '建议在解析响应前检查 response.ok，并给出清晰的失败提示。']
+    ];
+    for (const [title, stamp, question, answer] of examples) {
+      const session = createSession(title, stamp);
+      addMessage('user', question, session);
+      addMessage('assistant', answer, session);
+    }
+    activateSession(createSession());
+    updateConnection();
+  </script>
+</body>
+</html>

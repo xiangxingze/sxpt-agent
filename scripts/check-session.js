@@ -1,3 +1,4 @@
+require('./source-loader');
 const Module = require('module');
 const path = require('path');
 
@@ -57,6 +58,14 @@ expect('按字符预算裁剪', store.totalChars() <= 62000, 'chars=' + store.to
 
 store.reset();
 expect('重置后为空', store.all.length === 0);
+expect('新建会话保留旧会话', store.history.length === 1);
+const previousId = store.history[0].id;
+store.saveDraft('新会话草稿');
+const freshId = store.currentId;
+store.select(previousId);
+expect('切换历史恢复消息', store.all.length > 0);
+store.select(freshId);
+expect('切回新会话恢复草稿', store.currentDraft === '新会话草稿');
 
 const ctx2 = makeContext({
   messages: [
@@ -77,6 +86,21 @@ const s3 = new SessionStore(ctx3);
 s3.addUser('hi');
 s3.popLastIf('user');
 expect('回滚最后一条', s3.all.length === 0);
+
+const persisted = new Map();
+const historyContext = { workspaceState: { get: (key) => persisted.get(key), update: async (key, value) => persisted.set(key, structuredClone(value)) } };
+const historyStore = new SessionStore(historyContext);
+historyStore.addUser('保留这条会话');
+historyStore.addAssistant('历史回答');
+const retainedId = historyStore.currentId;
+historyStore.reset();
+historyStore.saveDraft('重启后继续');
+const reloaded = new SessionStore(historyContext);
+expect('重启恢复当前草稿', reloaded.currentDraft === '重启后继续');
+reloaded.select(retainedId);
+expect('重启恢复历史和上下文', reloaded.all[1].content === '历史回答');
+for (let index = 0; index < 25; index++) { reloaded.reset(); reloaded.addUser('会话 ' + index); }
+expect('会话历史限制数量', reloaded.history.length <= 20);
 
 if (fail > 0) {
   console.error(fail + ' check(s) failed');

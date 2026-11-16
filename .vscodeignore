@@ -1,6 +1,7 @@
 .vscode/**
 src/**
 scripts/**
+prototype/**
 out/**/*.map
 tsconfig.json
 .gitignore

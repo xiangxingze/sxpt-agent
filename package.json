@@ -1,7 +1,7 @@
 {
   "name": "sxpt-agent",
   "displayName": "SXPT AI Coding Agent",
-  "description": "实训平台内置 VS Code 的 AI 编程 Agent：自主查看代码、修改文件、运行命令并验证，所有修改经 Diff 审核、可一键撤销。界面全部使用 VS Code 原生组件，局域网 http 环境下也能使用。",
+  "description": "实训平台内置 VS Code 的 AI 编程 Agent：统一对话与设置面板、会话历史、Diff 审核与撤销，提供原生终端备用入口。",
   "version": "0.3.0",
   "publisher": "sxpt",
   "license": "MIT",
@@ -38,25 +38,25 @@
       "ptnAgent": [
         {
           "id": "ptnAgent.sessionView",
+          "type": "webview",
           "name": "对话",
           "icon": "media/agent.svg",
           "contextualTitle": "AI Agent"
         }
       ]
     },
-    "viewsWelcome": [
+    "commands": [
       {
-        "view": "ptnAgent.sessionView",
-        "when": "!ptnAgent.configured",
-        "contents": "还没有连接模型服务。\n填写 API 地址、API Key 并选择模型后就可以开始。\n[配置模型服务](command:ptnAgent.settings)"
+        "command": "ptnAgent.openTerminalChat",
+        "title": "打开原生备用对话",
+        "category": "AI Agent"
       },
       {
-        "view": "ptnAgent.sessionView",
-        "when": "ptnAgent.configured",
-        "contents": "今天想一起完成什么？\n描述一个目标，我会阅读代码、制定计划、修改文件并验证结果。每次修改都会先让你确认。\n[打开对话窗口](command:ptnAgent.openChat)\n[输入任务…](command:ptnAgent.ask)\n也可以从这些任务开始：\n· [理解项目结构](command:ptnAgent.explainProject)\n· [分析当前的错误和警告](command:ptnAgent.analyzeProblem)\n· [修复问题并验证](command:ptnAgent.fixProblems)\n· [解释选中的代码](command:ptnAgent.explainSelection)\n· [为选中的代码生成测试](command:ptnAgent.generateTests)"
-      }
-    ],
-    "commands": [
+        "command": "ptnAgent.history",
+        "title": "历史会话",
+        "category": "AI Agent",
+        "icon": "$(history)"
+      },
       {
         "command": "ptnAgent.openChat",
         "title": "打开对话",
@@ -233,63 +233,7 @@
           "group": "3_chat@1"
         }
       ],
-      "view/title": [
-        {
-          "command": "ptnAgent.stop",
-          "when": "view == ptnAgent.sessionView && ptnAgent.busy",
-          "group": "navigation@0"
-        },
-        {
-          "command": "ptnAgent.openChat",
-          "when": "view == ptnAgent.sessionView",
-          "group": "navigation@1"
-        },
-        {
-          "command": "ptnAgent.newSession",
-          "when": "view == ptnAgent.sessionView",
-          "group": "navigation@2"
-        },
-        {
-          "command": "ptnAgent.undoLastPatch",
-          "when": "view == ptnAgent.sessionView",
-          "group": "navigation@3"
-        },
-        {
-          "command": "ptnAgent.settings",
-          "when": "view == ptnAgent.sessionView",
-          "group": "navigation@4"
-        },
-        {
-          "command": "ptnAgent.pickModel",
-          "when": "view == ptnAgent.sessionView",
-          "group": "1_config@1"
-        },
-        {
-          "command": "ptnAgent.pickMode",
-          "when": "view == ptnAgent.sessionView",
-          "group": "1_config@2"
-        },
-        {
-          "command": "ptnAgent.showContext",
-          "when": "view == ptnAgent.sessionView",
-          "group": "2_view@1"
-        },
-        {
-          "command": "ptnAgent.showProjectOutline",
-          "when": "view == ptnAgent.sessionView",
-          "group": "2_view@2"
-        },
-        {
-          "command": "ptnAgent.runTests",
-          "when": "view == ptnAgent.sessionView",
-          "group": "3_run@1"
-        },
-        {
-          "command": "ptnAgent.checkPi",
-          "when": "view == ptnAgent.sessionView",
-          "group": "4_env@1"
-        }
-      ],
+      "view/title": [],
       "view/item/context": [
         {
           "command": "ptnAgent.approval.diff",
@@ -392,7 +336,7 @@
             "对话显示在底部的终端面板里"
           ],
           "default": "beside",
-          "description": "对话窗口的位置，下次打开对话窗口时生效"
+          "description": "原生备用对话窗口的位置，下次打开备用对话时生效"
         },
         "ptnAgent.baseUrl": {
           "type": "string",
@@ -467,11 +411,12 @@
     "watch": "tsc -watch -p ./",
     "package": "vsce package",
     "lint": "tsc --noEmit -p ./",
-    "check": "node scripts/check-policy.js && node scripts/check-commands.js && node scripts/check-session.js && node scripts/check-platform.js && node scripts/check-undo.js && node scripts/check-models.js && node scripts/check-pi-custom-provider.js && node scripts/check-agent.js && node scripts/check-chat.js && node scripts/check-tui.js && node scripts/smoke.js"
+    "check": "node scripts/check-policy.js && node scripts/check-commands.js && node scripts/check-session.js && node scripts/check-platform.js && node scripts/check-undo.js && node scripts/check-models.js && node scripts/check-pi-custom-provider.js && node scripts/check-agent.js && node scripts/check-chat.js && node scripts/check-webview.js && node scripts/check-tui.js && node scripts/smoke.js"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/vscode": "^1.90.0",
+    "jsdom": "^29.1.1",
     "typescript": "^5.7.2"
   },
   "dependencies": {

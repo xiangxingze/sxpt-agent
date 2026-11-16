@@ -5,7 +5,7 @@ import { SecretStore } from './secrets';
 import { collectContext, contextToPrompt } from './contextCollector';
 import { PiAgent } from './agent/piAgent';
 import { SessionStore } from './agent/session';
-import { AgentHost, AgentSettings, ApprovalDecision, ApprovalRequest } from './agent/types';
+import { AgentHost, AgentMessage, AgentSettings, ApprovalDecision, ApprovalRequest } from './agent/types';
 import { toFriendlyError } from './modelCheck';
 import { ChangeTracker } from './changeTracker';
 import { DiffPreview } from './diffPreview';
@@ -68,6 +68,8 @@ export interface ChatSurface {
   reveal(preserveFocus?: boolean): Promise<void>;
   /** 打开文件 / Diff 时使用的编辑器列，避免盖住对话窗口 */
   docColumn(): vscode.ViewColumn | undefined;
+  openSettings?(): Promise<void>;
+  openHistory?(): Promise<void>;
 }
 
 /**
@@ -85,6 +87,11 @@ export class ChatController {
   private pendingContexts: string[] = [];
   private readonly settings: SettingsController;
   private readonly pendingApprovals = new Map<string, PendingApproval>();
+  private runCompletion?: Promise<void>;
+  private switching = false;
+  private savingSettings = false;
+  private runMessages: any[] = [];
+  private runHistory?: AgentMessage[];
 
   constructor(
     private readonly secrets: SecretStore,
@@ -113,7 +120,12 @@ export class ChatController {
     observer(this.historyMessage());
   }
 
-  private post(message: unknown): void {
+  private post(message: any): void {
+    if (this.busy && ['user', 'assistantStart', 'textDelta', 'textReset', 'toolStart', 'toolEnd', 'plan', 'info'].includes(message.type)) {
+      const last = this.runMessages[this.runMessages.length - 1];
+      if (message.type === 'textDelta' && last?.type === 'textDelta') last.text += message.text;
+      else this.runMessages.push({ ...message });
+    }
     this.surface?.post(message);
     for (const observer of this.observers) {
       try {
@@ -132,13 +144,28 @@ export class ChatController {
     await this.surface?.reveal(preserveFocus);
   }
 
-  private historyMessage(): { type: 'history'; messages: Array<{ role: string; content: string }> } {
+  private historyMessage(): Record<string, unknown> {
     return {
       type: 'history',
-      messages: this.session.all
+      sessionId: this.session.currentId,
+      draft: this.session.currentDraft,
+      messages: (this.runHistory ?? this.session.all)
         .filter((m) => m.role === 'user' || m.role === 'assistant')
         .map((m) => ({ role: m.role, content: m.content }))
     };
+  }
+
+  private postSessions(): void {
+    this.post({ type: 'sessions', activeId: this.session.currentId, sessions: this.session.history });
+  }
+
+  async openHistory(): Promise<void> {
+    if (this.surface?.openHistory) await this.surface.openHistory();
+    else {
+      const selected = await vscode.window.showQuickPick(this.session.history.map((session) => ({ label: session.title, id: session.id })), { title: '历史会话' });
+      if (selected) await this.changeSession(selected.id);
+    }
+    this.postSessions();
   }
 
   // ---------------- Agent 宿主能力 ----------------
@@ -310,18 +337,35 @@ export class ChatController {
   // ---------------- 会话 ----------------
 
   async newSession(): Promise<void> {
-    this.abort?.abort();
-    this.cancelPendingApprovals();
-    try {
-      await this.agent.reset();
-    } catch {
-      // 重置失败不阻塞 UI
+    await this.changeSession();
+  }
+
+  private async changeSession(id?: string): Promise<void> {
+    if (this.switching) return;
+    if (id && id === this.session.currentId) return;
+    if (id && !this.session.history.some((session) => session.id === id)) {
+      this.post({ type: 'sessionSwitchFailed', message: '找不到这条会话记录，请重新选择。' });
+      this.postSessions();
+      return;
     }
-    this.session.reset();
-    this.pendingContexts = [];
-    this.post({ type: 'cleared' });
-    await this.reveal();
-    await this.pushState();
+    this.switching = true;
+    try {
+      this.abort?.abort();
+      this.cancelPendingApprovals();
+      await this.runCompletion?.catch(() => undefined);
+      await this.agent.reset();
+      if (id) this.session.select(id);
+      else this.session.reset();
+      this.pendingContexts = [];
+      this.runMessages = [];
+      this.post({ type: 'cleared' });
+      this.post(this.historyMessage());
+      this.postSessions();
+      await this.reveal();
+      await this.pushState();
+    } finally {
+      this.switching = false;
+    }
   }
 
   stop(): void {
@@ -365,6 +409,8 @@ export class ChatController {
         // 同步回送状态与历史（见 ChatSurface 的约定），随后补发仍在等待的审批
         this.surface?.post(this.stateMessage());
         this.surface?.post(this.historyMessage());
+        for (const message of this.runMessages) this.surface?.post({ ...message, replay: true });
+        this.postSessions();
         for (const pending of this.pendingApprovals.values()) {
           this.surface?.post({ type: 'approval', request: this.approvalView(pending.request) });
         }
@@ -384,8 +430,40 @@ export class ChatController {
         this.stop();
         break;
       case 'newSession':
+        if (typeof msg.draft === 'string') this.session.saveDraft(msg.draft);
         await this.newSession();
         break;
+      case 'listSessions':
+        this.postSessions();
+        break;
+      case 'selectSession':
+        if (typeof msg.draft === 'string') this.session.saveDraft(msg.draft);
+        await this.changeSession(String(msg.id ?? ''));
+        break;
+      case 'saveDraft':
+        if (msg.sessionId === this.session.currentId && typeof msg.text === 'string') this.session.saveDraft(msg.text);
+        break;
+      case 'getSettings':
+        this.surface?.post({ type: 'settingsData', values: await this.settings.formData() });
+        break;
+      case 'saveSettings':
+      case 'fetchModels':
+      case 'testConnection': {
+        if (msg.type === 'saveSettings' && (this.busy || this.savingSettings)) {
+          this.post({ type: 'settingsResult', action: msg.type, requestId: msg.requestId, ok: false, message: '请等待当前操作结束后再保存设置。' });
+          break;
+        }
+        if (msg.type === 'saveSettings') this.savingSettings = true;
+        try {
+          const result = await this.settings.formAction(msg.type, msg.values);
+          this.surface?.post({ type: 'settingsResult', action: msg.type, requestId: msg.requestId, ...result });
+        } catch (error) {
+          this.surface?.post({ type: 'settingsResult', action: msg.type, requestId: msg.requestId, ok: false, message: toFriendlyError(error) });
+        } finally {
+          if (msg.type === 'saveSettings') this.savingSettings = false;
+        }
+        break;
+      }
       case 'showContext':
         await vscode.commands.executeCommand('ptnAgent.showContext');
         break;
@@ -406,6 +484,11 @@ export class ChatController {
       case 'openFile':
         await this.openFileRef(String(msg.ref ?? ''));
         break;
+      case 'openExternal': {
+        const uri = vscode.Uri.parse(String(msg.url ?? ''));
+        if (uri.scheme === 'https' || uri.scheme === 'http') await vscode.env.openExternal(uri);
+        break;
+      }
       case 'openSettings':
         await this.openSettings();
         break;
@@ -429,9 +512,13 @@ export class ChatController {
     await this.pushState();
   }
 
-  // ---------------- 设置（原生 QuickPick / InputBox） ----------------
+  // ---------------- 设置（统一面板表单 / 原生备用入口） ----------------
 
   async openSettings(): Promise<void> {
+    if (this.surface?.openSettings) {
+      await this.surface.openSettings();
+      return;
+    }
     const wasConfigured = isModelConfigured(readConfig());
     await this.settings.open();
     // 首次配置完成后直接打开对话窗口
@@ -441,10 +528,12 @@ export class ChatController {
   }
 
   async pickModel(): Promise<void> {
+    if (this.surface?.openSettings) return this.openSettings();
     await this.settings.pickModel();
   }
 
   async pickApprovalMode(): Promise<void> {
+    if (this.surface?.openSettings) return this.openSettings();
     await this.settings.pickMode();
   }
 
@@ -509,6 +598,7 @@ export class ChatController {
       contextLabel: label,
       contextWarn: label.indexOf('未打开') >= 0,
       sessionCount: this.session.count,
+      sessionId: this.session.currentId,
       undoCount: this.tracker.undoCount
     };
   }
@@ -599,16 +689,40 @@ export class ChatController {
 
   async handleUserText(text: string, forceProjectContext = false): Promise<void> {
     const trimmed = text.trim();
-    if (!trimmed || this.busy) {
+    if (!trimmed || this.busy || this.switching || this.savingSettings) {
       return;
     }
+    this.busy = true;
+    this.runMessages = [];
+    const controller = new AbortController();
+    this.abort = controller;
+    const completion = this.runUserText(trimmed, forceProjectContext, controller);
+    this.runCompletion = completion;
+    try {
+      await completion;
+    } catch (error) {
+      const friendly = controller.signal.aborted ? '已停止。' : toFriendlyError(error);
+      if (this.session.all.at(-1)?.role === 'user') this.session.addAssistant(friendly);
+      this.post({ type: 'error', message: friendly });
+    } finally {
+      this.runCompletion = undefined;
+      this.runMessages = [];
+      this.runHistory = undefined;
+      this.abort = undefined;
+      this.busy = false;
+      this.postSessions();
+      await this.pushState();
+    }
+  }
 
+  private async runUserText(trimmed: string, forceProjectContext: boolean, controller: AbortController): Promise<void> {
     const cfg = readConfig();
     if (!isModelConfigured(cfg)) {
       await this.openSettings();
       return;
     }
     const apiKey = await this.secrets.getApiKey();
+    if (controller.signal.aborted) return;
     const settings = this.buildSettings(cfg, apiKey);
     if (!settings) {
       const open = await vscode.window.showWarningMessage(
@@ -621,16 +735,18 @@ export class ChatController {
       return;
     }
 
-    this.busy = true;
     this.updateStatusBar();
+    const previousHistory = [...this.session.all];
+    this.runHistory = previousHistory;
+    this.session.saveDraft('');
     this.post({ type: 'user', text: trimmed });
     this.post({ type: 'state', busy: true });
 
     this.tracker.beginRun();
-    const controller = new AbortController();
-    this.abort = controller;
     const id = `a${Date.now()}`;
     let changedFiles: string[] = [];
+    let replyText = '';
+    this.session.addUser(trimmed);
 
     try {
       const contextBlock = await this.buildContextBlock(cfg, trimmed, forceProjectContext);
@@ -638,11 +754,12 @@ export class ChatController {
 
       this.post({ type: 'assistantStart', id });
       try {
+        if (controller.signal.aborted) throw new Error('已停止');
         const result = await this.agent.run(
-          { prompt, history: this.session.all, settings, signal: controller.signal },
+          { prompt, history: previousHistory, settings, signal: controller.signal },
           {
-            onTextDelta: (delta) => this.post({ type: 'textDelta', text: delta }),
-            onTextReset: () => this.post({ type: 'textReset' }),
+            onTextDelta: (delta) => { replyText += delta; this.post({ type: 'textDelta', text: delta }); },
+            onTextReset: () => { replyText = ''; this.post({ type: 'textReset' }); },
             onToolStart: (info) => this.post({ type: 'toolStart', ...info }),
             onToolEnd: (info) => this.post({ type: 'toolEnd', ...info }),
             onStatus: (status) => this.post({ type: 'info', message: status })
@@ -654,19 +771,21 @@ export class ChatController {
           changedFiles.length > 0
             ? `\n\n（本次修改了：${changedFiles.map((f) => this.rel(f)).join('、')}）`
             : '';
-        this.session.addUser(trimmed);
-        this.session.addAssistant((result.text || '（已完成操作）') + changeNote);
+        const finalText = result.text || replyText || (result.aborted ? '已停止。' : '（已完成操作）');
+        this.session.addAssistant(finalText + changeNote);
 
         const seconds = (result.elapsedMs / 1000).toFixed(1);
         this.post({
           type: 'assistantEnd',
           id,
           aborted: result.aborted,
+          text: finalText,
           meta: `${result.model} · ${seconds}s${result.toolCalls ? ` · ${result.toolCalls} 次工具调用` : ''}${result.aborted ? ' · 已停止' : ''}`
         });
       } catch (err) {
         changedFiles = this.tracker.commitRun();
-        const friendly = toFriendlyError(err);
+        const friendly = controller.signal.aborted ? '已停止。' : toFriendlyError(err);
+        this.session.addAssistant([replyText, friendly].filter(Boolean).join('\n\n'));
         this.post({ type: 'assistantEnd', id, aborted: true, meta: '' });
         this.post({ type: 'error', message: friendly });
         this.output.appendLine(`[agent] ${friendly}`);
@@ -683,9 +802,6 @@ export class ChatController {
       this.tracker.commitRun();
       this.cancelPendingApprovals();
       this.abort = undefined;
-      this.busy = false;
-      this.updateStatusBar();
-      await this.pushState();
     }
   }
 

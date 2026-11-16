@@ -49,7 +49,7 @@ type Item = vscode.QuickPickItem & { id?: string; value?: string };
 const sep = (label: string): Item => ({ label, kind: vscode.QuickPickItemKind.Separator });
 
 /**
- * 设置：全部用 VS Code 原生的 QuickPick / InputBox 完成，不依赖 webview。
+ * 主面板使用表单设置，原生备用对话保留 QuickPick / InputBox 设置入口。
  * 模型列表来自学生所填 API 地址的 `/models` 接口，不使用任何预设供应商。
  * API Key 只保存在 SecretStorage，界面上只显示「已保存 / 未填写」。
  */
@@ -98,7 +98,53 @@ export class SettingsController {
   }
 
   private update(key: string, value: unknown): Thenable<void> {
-    return vscode.workspace.getConfiguration(CONFIG_SECTION).update(key, value, vscode.ConfigurationTarget.Global);
+    const configuration = vscode.workspace.getConfiguration(CONFIG_SECTION);
+    const inspected = configuration.inspect?.(key);
+    const target = inspected?.workspaceFolderValue !== undefined ? vscode.ConfigurationTarget.WorkspaceFolder
+      : inspected?.workspaceValue !== undefined ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
+    return configuration.update(key, value, target);
+  }
+
+  async formData(): Promise<Record<string, unknown>> {
+    const cfg = readConfig();
+    return { baseUrl: cfg.baseUrl, model: cfg.model, approvalMode: cfg.approvalMode,
+      contextWindow: cfg.contextWindow, maxOutputTokens: cfg.maxOutputTokens,
+      autoContext: cfg.autoContext, systemPromptExtra: cfg.systemPromptExtra,
+      allowedCommands: cfg.allowedCommands.join('\n'), hasKey: await this.secrets.hasApiKey() };
+  }
+
+  async formAction(action: string, values: any): Promise<Record<string, unknown>> {
+    const baseUrl = normalizeBaseUrl(typeof values?.baseUrl === 'string' ? values.baseUrl : '');
+    const model = typeof values?.model === 'string' ? values.model.trim() : '';
+    const invalidUrl = !baseUrl || !isValidBaseUrl(baseUrl);
+    if (invalidUrl) return { ok: false, message: '请填写以 http:// 或 https:// 开头的 API 地址。' };
+    const apiKey = typeof values?.apiKey === 'string' ? values.apiKey.trim() : '';
+    const key = values?.clearKey === true ? undefined : apiKey || (baseUrl === readConfig().baseUrl ? await this.secrets.getApiKey() : undefined);
+    if (action === 'fetchModels') {
+      const result = await fetchModels(baseUrl, key);
+      if (result.ok) this.storeModels(baseUrl, result.models);
+      return { ...result, message: result.ok ? `已获取 ${result.models.length} 个模型。` : result.message };
+    }
+    if (!model) return { ok: false, message: '请填写模型名称。' };
+    if (action === 'testConnection') return testConnection(baseUrl, model, key);
+    if (action !== 'saveSettings') return { ok: false, message: '未知设置操作。' };
+    const mode = values.approvalMode;
+    const invalid = validateContextWindowInput(String(values.contextWindow ?? '')) || validateMaxOutputInput(String(values.maxOutputTokens ?? ''));
+    if (invalid) return { ok: false, message: invalid };
+    if (!MODES.includes(mode)) return { ok: false, message: '请选择有效的操作确认方式。' };
+    const commands = typeof values.allowedCommands === 'string' ? values.allowedCommands.split('\n').map((command: string) => command.trim()).filter(Boolean) : [];
+    if (commands.some((command: string) => /[;&|<>$()`]/.test(command))) return { ok: false, message: '免确认命令不能包含 shell 控制符。' };
+    if (!apiKey && !values.clearKey && baseUrl !== readConfig().baseUrl && await this.secrets.hasApiKey()) {
+      return { ok: false, message: 'API 地址已变化，请填写对应的 Key，或勾选清除旧 Key 后使用无 Key 的本地模型。' };
+    }
+    const changes: Record<string, unknown> = { baseUrl, model, approvalMode: mode,
+      contextWindow: Number(values.contextWindow), maxOutputTokens: Number(values.maxOutputTokens),
+      autoContext: values.autoContext === true, systemPromptExtra: typeof values.systemPromptExtra === 'string' ? values.systemPromptExtra : '',
+      allowedCommands: commands };
+    for (const [name, value] of Object.entries(changes)) await this.update(name, value);
+    if (values.clearKey === true || apiKey) await this.secrets.setApiKey(values.clearKey === true ? '' : apiKey);
+    await this.onChanged();
+    return { ok: true, message: '设置已保存。', values: await this.formData() };
   }
 
   // ---------------- 入口 ----------------

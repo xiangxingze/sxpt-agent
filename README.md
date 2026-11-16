@@ -4,7 +4,7 @@
 
 学生用自然语言描述任务，Agent 自己查看代码、修改文件、运行命令并验证结果，直到任务完成。每一次文件修改都先在 VS Code 原生 Diff 中让学生审核，命令执行前需要确认，改错了可以一键撤销。学生只需填写 API 地址、API Key 并选择模型即可使用。
 
-界面全部由 VS Code 原生组件构成（终端标签页、树视图、QuickPick、Diff 编辑器），不使用 webview，因此在局域网里以 `http://` 访问的 code-server 中也能正常使用。
+默认界面采用 V4 统一面板：对话、新建会话、历史记录和表单设置都在同一个 VS Code 扩展视图内完成。Diff 使用 VS Code 原生编辑器；另保留原生终端备用对话，供无法加载 Webview 的环境使用。
 
 ## Agent 能力
 
@@ -23,7 +23,7 @@ Agent 基于内置的 [Pi](https://www.npmjs.com/package/@earendil-works/pi-codi
 
 ### 审批模式
 
-对话中输入 `/mode`，或命令面板 `AI Agent: 切换审批模式`，或设置 `ptnAgent.approvalMode`：
+在设置的高级选项中选择操作确认方式，或通过命令面板 `AI Agent: 切换审批模式`、配置项 `ptnAgent.approvalMode` 调整（备用终端支持 `/mode`）：
 
 | 模式 | 行为 |
 | --- | --- |
@@ -47,45 +47,35 @@ Agent 基于内置的 [Pi](https://www.npmjs.com/package/@earendil-works/pi-codi
 
 ### 撤销
 
-每次任务结束后，对话里会汇总本次修改的文件（侧栏中也列在这一轮对话下面，可点击打开）。对话中输入 `/undo`、点击侧栏标题栏的撤销按钮，或命令 `AI Agent: 撤销上次 AI 修改` 即可恢复。保留最近 10 次任务的快照；超过 1 MB 的文件不保存快照，撤销时会提示。
+每次任务结束后，对话里会汇总本次修改的文件，可点击打开。点击输入框下方的「撤销上次修改」，或命令 `AI Agent: 撤销上次 AI 修改` 即可恢复；备用终端也支持 `/undo`。保留最近 10 次任务的快照；超过 1 MB 的文件不保存快照，撤销时会提示。
 
 ## 界面
 
-### 为什么不用 webview
+### 统一 Agent 面板
 
-webview 依赖 Service Worker，而浏览器只在安全上下文（`https://` 或 `localhost`）里允许注册 Service Worker。实训平台在局域网里以 `http://<IP>` 提供 code-server，无法配置 https，webview 会报 `Could not register service workers` 而一片空白。终端、树视图、QuickPick、Diff 编辑器都由 workbench 自己渲染，不受这个限制。
+`Ctrl+Alt+I` 或活动栏的 Agent 图标打开「对话」视图，布局参考 Codex 的 VS Code 扩展：
 
-### 对话窗口
-
-`Ctrl+Alt+I`（或活动栏 → 侧栏标题栏的对话按钮）打开名为 **AI Agent** 的终端标签页，默认在编辑器右侧（`ptnAgent.chatLocation` 可改为底部面板）。界面风格与 Claude Code / Codex 的终端界面一致：
-
-- 回答边生成边按 Markdown 排版（标题、列表、表格、代码块），中文按双宽字符对齐，窗口缩放后重新排版
-- 工具调用逐条显示（`● 修改 a.txt  +2 −1`），多步任务显示计划与进度
-- 回答里的 `文件:行号` 可 `Ctrl` / `Cmd` + 单击跳转，文件在对话窗口之外的编辑器列打开
-- 审批直接在对话里完成：`↑` / `↓` 选择后回车，或按数字键；`y` 允许，`n` / `Esc` 拒绝，`d` 重新打开 Diff。文件修改的 Diff 会同时在旁边的编辑器列打开
-- 对话窗口关闭时，等待中的审批自动改用 VS Code 原生弹窗
+- 顶部只保留「新建会话」「历史记录」「设置」三个操作；对话页不展示历史会话列表。
+- 对话居中展示欢迎提示或消息，底部固定圆角输入框、当前文件上下文和模型状态。
+- 回答按 Markdown 流式展示，支持标题、列表、表格、代码块；工具步骤可展开，计划显示完成进度。
+- 点击回答里的代码格式文件引用（如 `src/main.ts:12`）可以跳转到编辑器。
+- 需要确认的操作显示「查看修改」「允许修改 / 允许运行」「暂不执行」；Diff 在原生编辑器中展示。
+- 设置和历史记录在当前面板内平滑切换；返回对话时保留输入草稿和阅读位置，未保存的设置也保留。
+- 任务运行中发送按钮变为停止按钮；任务结束后可以撤销文件修改。面板关闭后的待确认操作转为原生弹窗。
 
 | 按键 | 作用 |
 | --- | --- |
 | `Enter` | 发送 |
-| `Shift+Enter` | 换行（也可用 `Alt+Enter`、`Ctrl+J`，或行尾输入 `\` 再回车） |
-| `↑` / `↓` | 翻看输入历史 |
-| `Esc` | 停止正在运行的任务 / 拒绝审批 |
-| `Ctrl+C` | 清空输入；任务运行中为停止 |
-| `Ctrl+U` | 删除到行首 |
+| `Shift+Enter` | 换行 |
+| `Esc` | 从设置或历史返回对话 |
 
-输入 `/` 弹出斜杠命令：`/new`（`/clear`）、`/model`、`/mode`、`/settings`、`/undo`、`/context`、`/explain`、`/problems`、`/fix`、`/tests`、`/refactor`、`/project`、`/run`、`/stop`、`/help`。
+### 历史记录与备用入口
 
-### 侧栏
+历史记录仅从顶部按钮或命令 `AI Agent: 历史会话` 进入。记录保存在当前工作区，最多保留 20 个会话，各会话最多保留 40 条消息并按 60000 字符预算裁剪（最后两条消息保留）。新建会话保留原会话；切换时恢复对话文本与草稿，不恢复旧工具步骤或旧任务执行。执行中切换会话会先停止并收尾当前任务，再进入目标会话。旧版本的单会话文本会自动迁移。
 
-活动栏图标打开「对话」树视图：
+局域网 `http://<IP>` code-server 可能因浏览器安全上下文限制而无法注册 Webview 的 Service Worker。若主面板未完成加载，扩展在约 8 秒后提示打开备用入口，也可以直接执行 `AI Agent: 打开原生备用对话`。此入口保留终端对话、原生设置菜单、Diff 审批和撤销功能；`ptnAgent.chatLocation` 只控制备用终端的位置。备用终端支持 `/new`、`/settings`、`/model`、`/mode`、`/undo` 等斜杠命令。
 
-- 未配置时显示「配置模型服务」引导；配置后显示欢迎页和常用任务入口
-- 有对话后按轮次列出：每一轮下面是工具步骤（成功 / 失败）、回答（点击在编辑器中以 Markdown 打开）、改动的文件
-- 等待确认的操作置顶，行内有「查看修改」「允许」「拒绝」按钮，视图图标上显示待确认数量
-- 标题栏按钮：停止（运行中）、打开对话、新建对话、撤销、设置；`…` 菜单里有切换模型 / 模式、查看上下文、项目结构摘要、运行测试、检查运行环境
-
-状态栏显示当前模型；运行中显示旋转图标，等待确认时高亮提示，点击打开对话窗口。
+状态栏显示当前模型和运行状态，点击打开主面板。
 
 ## 对话与上下文
 
@@ -119,18 +109,17 @@ code --install-extension sxpt-agent-0.3.0.vsix
 
 ## 配置
 
-常用设置都在一个原生菜单（QuickPick）里完成：侧栏标题栏的 ⚙、对话中输入 `/settings`，或命令面板执行 `AI Agent: 打开设置`。
+点击主面板顶部唯一的设置图标，或执行 `AI Agent: 打开设置`，在当前面板内打开表单。
 
 | 分组 | 内容 |
 | --- | --- |
 | 模型服务 | **API 地址**、**API Key**、**模型**（从你填的 API 地址自动获取列表，也可手动输入）、测试连接 |
-| Agent 行为 | 审批模式（逐项确认 / 自动应用修改 / 只读）、免确认的命令前缀、对话窗口位置 |
-| 高级 | 上下文窗口、单次最大输出、是否自动附带当前文件、自定义指令（转到设置编辑器） |
+| 高级（默认折叠） | 操作确认方式、上下文窗口、单次最大输出、自动附带当前文件、免确认命令、自定义指令、清除 Key |
 
-- **首次使用**会依次引导填写 API 地址 → API Key → 选择模型，最后测试连接并打开对话窗口；没填好之前不会调用模型。
+- **首次使用**在同一张表单填写 API 地址、API Key 和模型，可先「获取模型」「测试连接」再「保存设置」。获取和测试使用表单当前值，不提前保存；保存后返回对话。
 - **没有预设供应商**：接入任何 OpenAI 兼容接口（DeepSeek、通义、OpenAI、Ollama、vLLM、公司内部网关……），模型列表来自 `GET {API 地址}/models`，缓存 10 分钟，可在列表里「重新获取」。接口不提供列表时，手动输入模型名即可。
-- **API Key** 只保存在 VS Code SecretStorage，不写入配置文件；输入框是密码框，菜单里只显示「已保存 / 未填写」，可保留、重新输入或清除。本地模型可以不填 Key。
-- 对话中输入 `/model`、`/mode` 可直接切换模型和审批模式。
+- **API Key** 只保存在 VS Code SecretStorage，不回传已存 Key；输入框为空时保留原 Key。更换 API 地址时需要填写对应 Key，或在高级设置明确清除旧 Key 后使用无 Key 的本地模型。
+- 命令「切换模型」「切换审批模式」在主面板统一进入此表单；备用终端保留原生菜单与逐步引导。
 
 对应的 VS Code 配置项（搜索 `ptnAgent`）：
 
@@ -139,7 +128,7 @@ code --install-extension sxpt-agent-0.3.0.vsix
 | `ptnAgent.baseUrl` | API 地址，含版本路径，如 `https://api.example.com/v1` | 空 |
 | `ptnAgent.model` | 模型名称，需支持工具调用（function calling） | 空 |
 | `ptnAgent.approvalMode` | `ask` / `autoEdit` / `readOnly` | `ask` |
-| `ptnAgent.chatLocation` | 对话窗口位置：`beside`（编辑器右侧）/ `panel`（底部面板），下次打开时生效 | `beside` |
+| `ptnAgent.chatLocation` | 备用终端位置：`beside`（编辑器右侧）/ `panel`（底部面板），下次打开备用终端时生效 | `beside` |
 | `ptnAgent.allowedCommands` | 可免确认执行的命令前缀，如 `npm test` | `[]` |
 | `ptnAgent.contextWindow` | 模型上下文窗口（token），用于自动压缩 | `128000` |
 | `ptnAgent.maxOutputTokens` | 单次回复最大输出 token | `8192` |
@@ -162,6 +151,7 @@ code --install-extension sxpt-agent-0.3.0.vsix
 | `AI Agent: 停止当前任务` | 对话窗口中 `Esc` |
 | `AI Agent: 打开设置` / `切换模型` | — |
 | `AI Agent: 新建对话` | — |
+| `AI Agent: 历史会话` / `打开原生备用对话` | — |
 | `AI Agent: 解释选中代码` | `Ctrl+Alt+E` |
 | `AI Agent: 分析当前错误` / `修复当前问题` | — |
 | `AI Agent: 生成单元测试` / `重构选中代码` / `理解项目结构` | — |
@@ -202,13 +192,14 @@ ptn-agent/
 │   ├── extension.ts           命令注册与激活，组装对话窗口、侧栏、状态栏
 │   ├── chatController.ts      Agent 的 VS Code 宿主：审批、Diff、上下文、快捷任务，向各界面广播消息
 │   ├── ui/
-│   │   ├── chatTerminal.ts    对话窗口：原生终端标签页（Pseudoterminal）、文件链接
+│   │   ├── chatWebview.ts     V4 统一面板宿主：本地资源、消息桥接、备用入口提示
+│   │   ├── chatTerminal.ts    备用对话：原生终端标签页（Pseudoterminal）、文件链接
 │   │   ├── chatTui.ts         终端里的对话界面：流式排版、工具步骤、审批、输入框、斜杠命令
 │   │   ├── lineEditor.ts      多行输入编辑（光标、历史、粘贴）
 │   │   ├── markdownAnsi.ts    Markdown → 终端排版（流式）
 │   │   ├── diffLines.ts       审批里显示的精简行级 Diff
 │   │   ├── ansi.ts            ANSI 样式、宽字符宽度、折行、外部文本清洗
-│   │   └── sessionTree.ts     侧栏树视图：对话轮次、工具步骤、待确认操作
+│   │   └── sessionTree.ts     旧树视图实现（主界面不再注册）
 │   ├── agent/
 │   │   ├── piAgent.ts         Agent 核心：Pi 会话、tool_call 拦截、自定义工具
 │   │   ├── policy.ts          路径围栏、敏感文件、edit 预览（纯逻辑，可单测）
@@ -222,10 +213,10 @@ ptn-agent/
 │   ├── platform/client.ts     平台上下文与缓存
 │   ├── tools/commandRunner.ts 高危命令规则、白名单、命令分级
 │   ├── prompts.ts             系统提示词
-│   ├── settingsController.ts  原生设置菜单与首次引导：读写设置、按所填 API 获取模型、连接测试
+│   ├── settingsController.ts  表单操作及原生备用设置：读写设置、获取模型、连接测试
 │   ├── modelCheck.ts          模型列表解析、连接测试、错误友好化
 │   ├── config.ts / secrets.ts
-├── media/agent.svg            活动栏图标
+├── media/                    活动栏图标、chat.html / chat.css / chat.js 面板资源
 └── scripts/                   自检脚本
 ```
 
@@ -234,7 +225,16 @@ Agent 核心不依赖 `vscode`：它通过 `AgentHost` 接口向宿主要审批�
 ## 自检
 
 ```bash
-npm run compile
+node node_modules/typescript/bin/tsc --noEmit -p .
+node scripts/check-session.js
+node scripts/check-chat.js
+node scripts/check-webview.js
+node scripts/smoke.js
+```
+
+以上脚本直接检查当前源码，TypeScript 仅在测试进程内转换，不生成 `out` 或安装包。完整历史回归还包含依赖既有 `out` 的脚本，手动构建后可运行：
+
+```bash
 npm run check
 ```
 
@@ -248,11 +248,13 @@ npm run check
 | `check-agent.js` | 真实 Pi SDK + 脚本化假模型：多步工具链、拦截与审批、只读/自动模式、未保存保护、停止、接口报错 |
 | `check-models.js` | `/models` 三种响应形态解析、按所填地址获取、401/404/空列表、连接测试、错误友好化 |
 | `check-chat.js` | 控制器消息协议与顺序、审批往返（对话窗口 / 原生弹窗 / 窗口关闭后降级 / 侧栏按钮）、停止、撤销；原生设置菜单与首次引导、校验、Key 不回显、模型列表与缓存；文件引用；侧栏树视图 |
+| `check-webview.js` | 实际面板 DOM 交互：设置切换、草稿与滚动保留、失败重试、流式消息、Markdown 转义、审批、历史与新建会话 |
 | `check-tui.js` | 用一个最小终端模拟器驱动对话界面：宽字符与折行、Markdown 流式排版（逐字与一次性结果一致、无残影）、转义序列清洗、工具与计划、审批按键、斜杠命令、多行输入与粘贴、窗口缩放、打开前的消息补放 |
-| `smoke.js` | 扩展激活、命令注册、侧栏树视图、打开对话终端并绘制欢迎框、文件链接只作用于对话终端 |
+| `smoke.js` | 扩展激活、命令注册、统一 Webview 注册与实际模板加载、CSP、本地资源、设置页补发、备用终端及其文件链接 |
 
 ## 已知限制
 
+- V4 主面板依赖 VS Code Webview；非安全 HTTP code-server 需使用原生备用对话，或配置 HTTPS / 安全上下文后使用主面板。
 - Pi SDK 需要 Node.js ≥ 22.19；在 code-server 中运行时取决于 code-server 自带的 Node 版本，可用 `AI Agent: 检查 Agent 运行环境` 查看。
 - 目前只验证过 OpenAI-compatible 的 Chat Completions；Anthropic / Responses 等协议需要增加 Pi Provider 配置。
 - `bash` 无法限制在工作区内、无法撤销（见上）。
