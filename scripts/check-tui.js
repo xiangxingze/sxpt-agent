@@ -4,6 +4,7 @@
  *  - ChatTui：用一个最小的 VT 终端模拟器接收它的输出，检查屏幕上最终看到的内容——
  *    流式输出不留残影、审批卡片按键、斜杠命令、多行输入与粘贴、窗口缩放、打开前的消息重放。
  */
+require('./source-loader');
 const Module = require('module');
 const path = require('path');
 
@@ -706,6 +707,7 @@ const EDIT_REQUEST = {
   };
   expect('/model', run('/model').type === 'pickModel');
   expect('/new', run('/new').type === 'newSession');
+  expect('/history 打开原生历史选择器', run('/history').type === 'openHistory');
   expect('/clear 等同于 /new', run('/clear').type === 'newSession');
   expect('/settings', run('/settings').type === 'openSettings');
   expect('/undo', run('/undo').type === 'undo');
@@ -788,6 +790,35 @@ const EDIT_REQUEST = {
 // ---------------------------------------------------------------------------
 // 10. ChatTui：历史、清空、窗口缩放、打开前的消息
 // ---------------------------------------------------------------------------
+{
+  const t = mk();
+  t.key('当前会话草稿');
+  expect('原生终端可以读取未发送草稿', t.tui.draft === '当前会话草稿');
+  t.tui.receive({ type: 'cleared' });
+  t.tui.receive({ type: 'history', messages: [], draft: '切回会话恢复的草稿' });
+  expect('会话切换恢复输入且没有旧会话残留', t.tui.draft === '切回会话恢复的草稿' && !t.term.text().includes('当前会话草稿'));
+  t.tui.receive({ type: 'cleared' });
+  t.tui.receive({ type: 'history', messages: [], draft: '' });
+  expect('新建会话输入为空', t.tui.draft === '');
+}
+
+{
+  const t = mk({ closed: true, onEmit: (message, tui) => {
+    if (message.type !== 'ready') return;
+    tui.receive({ type: 'history', replacePending: true, messages: [], draft: '下一条草稿' });
+    tui.receive({ type: 'user', text: '正在运行的请求', replay: true });
+    tui.receive({ type: 'assistantStart', replay: true });
+    tui.receive({ type: 'textDelta', text: '运行中的回复', replay: true });
+  } });
+  t.tui.receive({ type: 'user', text: '正在运行的请求' });
+  t.tui.receive({ type: 'assistantStart' });
+  t.tui.receive({ type: 'textDelta', text: '运行中的回复' });
+  t.tui.receive({ type: 'notice', text: '手动命令已经完成' });
+  t.tui.open(80, 30);
+  expect('宿主补发运行快照后不会重复显示打开前的消息', t.term.count('正在运行的请求') === 1 && t.term.count('运行中的回复') === 1 && t.tui.draft === '下一条草稿', t.term.text());
+  expect('补发会话后仍保留打开前的独立操作通知', t.term.count('手动命令已经完成') === 1);
+}
+
 {
   const t = mk();
   t.tui.receive({

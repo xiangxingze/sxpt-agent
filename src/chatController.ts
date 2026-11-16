@@ -68,8 +68,7 @@ export interface ChatSurface {
   reveal(preserveFocus?: boolean): Promise<void>;
   /** 打开文件 / Diff 时使用的编辑器列，避免盖住对话窗口 */
   docColumn(): vscode.ViewColumn | undefined;
-  openSettings?(): Promise<void>;
-  openHistory?(): Promise<void>;
+  draft?(): string | undefined;
 }
 
 /**
@@ -89,7 +88,6 @@ export class ChatController {
   private readonly pendingApprovals = new Map<string, PendingApproval>();
   private runCompletion?: Promise<void>;
   private switching = false;
-  private savingSettings = false;
   private runMessages: any[] = [];
   private runHistory?: AgentMessage[];
 
@@ -147,6 +145,7 @@ export class ChatController {
   private historyMessage(): Record<string, unknown> {
     return {
       type: 'history',
+      replacePending: true,
       sessionId: this.session.currentId,
       draft: this.session.currentDraft,
       messages: (this.runHistory ?? this.session.all)
@@ -160,12 +159,16 @@ export class ChatController {
   }
 
   async openHistory(): Promise<void> {
-    if (this.surface?.openHistory) await this.surface.openHistory();
-    else {
-      const selected = await vscode.window.showQuickPick(this.session.history.map((session) => ({ label: session.title, id: session.id })), { title: '历史会话' });
-      if (selected) await this.changeSession(selected.id);
+    const sessions = this.session.history;
+    if (!sessions.length) {
+      void vscode.window.showInformationMessage('还没有历史会话，开始对话后会自动保存。');
+      return;
     }
-    this.postSessions();
+    const selected = await vscode.window.showQuickPick(sessions.map((session) => ({
+      label: session.title, id: session.id,
+      description: session.id === this.session.currentId ? '当前会话' : new Date(session.updatedAt).toLocaleString()
+    })), { title: '历史会话', placeHolder: '选择要继续的会话，Esc 返回当前对话', matchOnDescription: true });
+    if (selected) await this.changeSession(selected.id);
   }
 
   // ---------------- Agent 宿主能力 ----------------
@@ -344,10 +347,12 @@ export class ChatController {
     if (this.switching) return;
     if (id && id === this.session.currentId) return;
     if (id && !this.session.history.some((session) => session.id === id)) {
-      this.post({ type: 'sessionSwitchFailed', message: '找不到这条会话记录，请重新选择。' });
+      this.notify('找不到这条会话记录，请重新选择。', 'warn');
       this.postSessions();
       return;
     }
+    const draft = this.surface?.draft?.();
+    if (typeof draft === 'string') this.session.saveDraft(draft);
     this.switching = true;
     try {
       this.abort?.abort();
@@ -429,6 +434,9 @@ export class ChatController {
       case 'stop':
         this.stop();
         break;
+      case 'openHistory':
+        await this.openHistory();
+        break;
       case 'newSession':
         if (typeof msg.draft === 'string') this.session.saveDraft(msg.draft);
         await this.newSession();
@@ -443,27 +451,6 @@ export class ChatController {
       case 'saveDraft':
         if (msg.sessionId === this.session.currentId && typeof msg.text === 'string') this.session.saveDraft(msg.text);
         break;
-      case 'getSettings':
-        this.surface?.post({ type: 'settingsData', values: await this.settings.formData() });
-        break;
-      case 'saveSettings':
-      case 'fetchModels':
-      case 'testConnection': {
-        if (msg.type === 'saveSettings' && (this.busy || this.savingSettings)) {
-          this.post({ type: 'settingsResult', action: msg.type, requestId: msg.requestId, ok: false, message: '请等待当前操作结束后再保存设置。' });
-          break;
-        }
-        if (msg.type === 'saveSettings') this.savingSettings = true;
-        try {
-          const result = await this.settings.formAction(msg.type, msg.values);
-          this.surface?.post({ type: 'settingsResult', action: msg.type, requestId: msg.requestId, ...result });
-        } catch (error) {
-          this.surface?.post({ type: 'settingsResult', action: msg.type, requestId: msg.requestId, ok: false, message: toFriendlyError(error) });
-        } finally {
-          if (msg.type === 'saveSettings') this.savingSettings = false;
-        }
-        break;
-      }
       case 'showContext':
         await vscode.commands.executeCommand('ptnAgent.showContext');
         break;
@@ -484,11 +471,6 @@ export class ChatController {
       case 'openFile':
         await this.openFileRef(String(msg.ref ?? ''));
         break;
-      case 'openExternal': {
-        const uri = vscode.Uri.parse(String(msg.url ?? ''));
-        if (uri.scheme === 'https' || uri.scheme === 'http') await vscode.env.openExternal(uri);
-        break;
-      }
       case 'openSettings':
         await this.openSettings();
         break;
@@ -512,13 +494,9 @@ export class ChatController {
     await this.pushState();
   }
 
-  // ---------------- 设置（统一面板表单 / 原生备用入口） ----------------
+  // ---------------- 设置（原生 QuickPick / InputBox） ----------------
 
   async openSettings(): Promise<void> {
-    if (this.surface?.openSettings) {
-      await this.surface.openSettings();
-      return;
-    }
     const wasConfigured = isModelConfigured(readConfig());
     await this.settings.open();
     // 首次配置完成后直接打开对话窗口
@@ -528,12 +506,10 @@ export class ChatController {
   }
 
   async pickModel(): Promise<void> {
-    if (this.surface?.openSettings) return this.openSettings();
     await this.settings.pickModel();
   }
 
   async pickApprovalMode(): Promise<void> {
-    if (this.surface?.openSettings) return this.openSettings();
     await this.settings.pickMode();
   }
 
@@ -689,7 +665,7 @@ export class ChatController {
 
   async handleUserText(text: string, forceProjectContext = false): Promise<void> {
     const trimmed = text.trim();
-    if (!trimmed || this.busy || this.switching || this.savingSettings) {
+    if (!trimmed || this.busy || this.switching) {
       return;
     }
     this.busy = true;

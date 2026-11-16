@@ -205,6 +205,9 @@ export class SessionTree implements vscode.TreeDataProvider<Node> {
         }
         this.refresh(400);
         return;
+      case 'textReset':
+        if (this.current) this.current.reply = '';
+        break;
       case 'toolStart':
         if (this.current && msg.name !== 'update_plan') {
           this.current.steps.push({
@@ -258,6 +261,7 @@ export class SessionTree implements vscode.TreeDataProvider<Node> {
         break;
       case 'assistantEnd':
         if (this.current) {
+          if (typeof msg.text === 'string') this.current.reply = msg.text;
           this.current.meta = String(msg.meta ?? '');
           this.current.running = false;
           for (const s of this.current.steps) {

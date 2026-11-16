@@ -1,7 +1,7 @@
 {
   "name": "sxpt-agent",
   "displayName": "SXPT AI Coding Agent",
-  "description": "实训平台内置 VS Code 的 AI 编程 Agent：统一对话与设置面板、会话历史、Diff 审核与撤销，提供原生终端备用入口。",
+  "description": "实训平台内置 VS Code 的 AI 编程 Agent：原生终端对话、会话历史、QuickPick 设置、Diff 审核与撤销，支持局域网 HTTP code-server。",
   "version": "0.3.1",
   "publisher": "sxpt",
   "license": "MIT",
@@ -38,7 +38,6 @@
       "ptnAgent": [
         {
           "id": "ptnAgent.sessionView",
-          "type": "webview",
           "name": "对话",
           "icon": "media/agent.svg",
           "contextualTitle": "AI Agent"
@@ -233,7 +232,58 @@
           "group": "3_chat@1"
         }
       ],
-      "view/title": [],
+      "view/title": [
+        {
+          "command": "ptnAgent.newSession",
+          "when": "view == ptnAgent.sessionView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "ptnAgent.history",
+          "when": "view == ptnAgent.sessionView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "ptnAgent.settings",
+          "when": "view == ptnAgent.sessionView",
+          "group": "navigation@3"
+        },
+        {
+          "command": "ptnAgent.stop",
+          "when": "view == ptnAgent.sessionView && ptnAgent.busy",
+          "group": "navigation@4"
+        },
+        {
+          "command": "ptnAgent.openChat",
+          "when": "view == ptnAgent.sessionView",
+          "group": "1_chat@1"
+        },
+        {
+          "command": "ptnAgent.undoLastPatch",
+          "when": "view == ptnAgent.sessionView",
+          "group": "1_chat@2"
+        },
+        {
+          "command": "ptnAgent.showContext",
+          "when": "view == ptnAgent.sessionView",
+          "group": "2_context@1"
+        },
+        {
+          "command": "ptnAgent.showProjectOutline",
+          "when": "view == ptnAgent.sessionView",
+          "group": "2_context@2"
+        },
+        {
+          "command": "ptnAgent.runTests",
+          "when": "view == ptnAgent.sessionView",
+          "group": "3_run@1"
+        },
+        {
+          "command": "ptnAgent.checkPi",
+          "when": "view == ptnAgent.sessionView",
+          "group": "4_env@1"
+        }
+      ],
       "view/item/context": [
         {
           "command": "ptnAgent.approval.diff",
@@ -282,6 +332,10 @@
         },
         {
           "command": "ptnAgent.openReply",
+          "when": "false"
+        },
+        {
+          "command": "ptnAgent.openTerminalChat",
           "when": "false"
         }
       ]
@@ -336,7 +390,7 @@
             "对话显示在底部的终端面板里"
           ],
           "default": "beside",
-          "description": "原生备用对话窗口的位置，下次打开备用对话时生效"
+          "description": "原生对话终端的位置，下次打开对话终端时生效"
         },
         "ptnAgent.baseUrl": {
           "type": "string",
@@ -404,19 +458,30 @@
           "description": "单条命令的最长执行时间（毫秒）"
         }
       }
-    }
+    },
+    "viewsWelcome": [
+      {
+        "view": "ptnAgent.sessionView",
+        "when": "!ptnAgent.configured",
+        "contents": "还没有连接模型服务。\n填写 API 地址、API Key 并选择模型后就可以开始。\n[配置模型服务](command:ptnAgent.settings)"
+      },
+      {
+        "view": "ptnAgent.sessionView",
+        "when": "ptnAgent.configured",
+        "contents": "今天想一起完成什么？\n[打开对话窗口](command:ptnAgent.openChat)\n[输入任务…](command:ptnAgent.ask)"
+      }
+    ]
   },
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "package": "vsce package",
     "lint": "tsc --noEmit -p ./",
-    "check": "node scripts/check-policy.js && node scripts/check-commands.js && node scripts/check-session.js && node scripts/check-platform.js && node scripts/check-undo.js && node scripts/check-models.js && node scripts/check-pi-custom-provider.js && node scripts/check-agent.js && node scripts/check-chat.js && node scripts/check-webview.js && node scripts/check-tui.js && node scripts/smoke.js"
+    "check": "node scripts/check-policy.js && node scripts/check-commands.js && node scripts/check-session.js && node scripts/check-platform.js && node scripts/check-undo.js && node scripts/check-models.js && node scripts/check-pi-custom-provider.js && node scripts/check-agent.js && node scripts/check-chat.js && node scripts/check-tui.js && node scripts/smoke.js"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/vscode": "^1.90.0",
-    "jsdom": "^29.1.1",
     "typescript": "^5.7.2"
   },
   "dependencies": {

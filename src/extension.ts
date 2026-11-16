@@ -6,7 +6,7 @@ import { ChangeTracker } from './changeTracker';
 import { DiffPreview } from './diffPreview';
 import { ChatController } from './chatController';
 import { ChatTerminal } from './ui/chatTerminal';
-import { ChatWebview } from './ui/chatWebview';
+import { SessionTree } from './ui/sessionTree';
 import { PlatformClient, courseContextToPrompt } from './platform/client';
 import { getProjectOutline } from './project/outline';
 import { piSdkLoadError, probePiSdk } from './agent/piAgent';
@@ -27,33 +27,23 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const controller = new ChatController(secrets, tracker, diffs, platform, output, statusBar, context);
 
-  let usingTerminal = false;
   const terminal = new ChatTerminal({
-    onMessage: (message) => { if (usingTerminal) void controller.onMessage(message); },
+    onMessage: (message) => void controller.onMessage(message),
     cwd: () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
     location: () => readConfig().chatLocation
   });
-  const view = new ChatWebview(context.extensionUri, async (message) => {
-    if (usingTerminal && (message?.type === 'ready' || message?.type === 'closed')) return;
-    usingTerminal = false;
-    controller.attachSurface(view);
-    await controller.onMessage(message);
-  }, output);
-  controller.attachSurface(view);
-  const usePanel = () => { usingTerminal = false; controller.attachSurface(view); };
-  context.subscriptions.push(terminal, view,
-    vscode.window.registerWebviewViewProvider('ptnAgent.sessionView', view, { webviewOptions: { retainContextWhenHidden: true } }),
-    { dispose: () => controller.dispose() });
+  controller.attachSurface(terminal);
+  const tree = new SessionTree();
+  tree.register(context);
+  controller.addObserver((message) => tree.receive(message));
+  context.subscriptions.push(terminal, { dispose: () => controller.dispose() });
 
   const register = (id: string, handler: (...args: any[]) => any) =>
     context.subscriptions.push(vscode.commands.registerCommand(id, handler));
 
-  register('ptnAgent.openChat', async () => { usePanel(); await controller.reveal(); await controller.onMessage({ type: 'ready' }); });
-  register('ptnAgent.openTerminalChat', async () => {
-    usingTerminal = true;
-    controller.attachSurface(terminal);
-    await controller.reveal();
-  });
+  register('ptnAgent.openChat', () => controller.reveal());
+  // 兼容已保存的命令引用，原生终端现在就是默认对话入口。
+  register('ptnAgent.openTerminalChat', () => controller.reveal());
   register('ptnAgent.ask', () => controller.ask());
   register('ptnAgent.stop', () => controller.stop());
   register('ptnAgent.explainSelection', () => controller.runQuickAction('explain'));

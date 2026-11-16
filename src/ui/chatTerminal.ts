@@ -60,6 +60,7 @@ export interface ChatTerminalHost {
 export class ChatTerminal implements vscode.Disposable {
   private terminal?: vscode.Terminal;
   private tui?: ChatTui;
+  private sessionId?: string;
   private readonly disposables: vscode.Disposable[] = [];
 
   constructor(private readonly host: ChatTerminalHost) {
@@ -84,8 +85,19 @@ export class ChatTerminal implements vscode.Disposable {
     return !!this.tui;
   }
 
-  post(message: unknown): void {
+  post(message: any): void {
+    if (message?.type === 'history') this.sessionId = message.sessionId;
     this.tui?.receive(message);
+  }
+
+  draft(): string | undefined {
+    return this.tui?.draft;
+  }
+
+  private saveDraft(): void {
+    if (this.tui && this.sessionId) {
+      this.host.onMessage({ type: 'saveDraft', sessionId: this.sessionId, text: this.tui.draft });
+    }
   }
 
   async reveal(preserveFocus = false): Promise<void> {
@@ -152,6 +164,7 @@ export class ChatTerminal implements vscode.Disposable {
   }
 
   private forget(): void {
+    this.saveDraft();
     this.tui?.dispose();
     this.tui = undefined;
     this.terminal = undefined;
@@ -165,6 +178,7 @@ export class ChatTerminal implements vscode.Disposable {
   }
 
   dispose(): void {
+    this.saveDraft();
     for (const d of this.disposables) {
       d.dispose();
     }

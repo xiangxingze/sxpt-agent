@@ -49,6 +49,7 @@ interface SlashCommand {
 
 const SLASH_COMMANDS: SlashCommand[] = [
   { name: '/new', hint: '新建对话', message: { type: 'newSession' } },
+  { name: '/history', hint: '选择历史会话', message: { type: 'openHistory' }, whileBusy: true },
   { name: '/model', hint: '切换模型', message: { type: 'pickModel' } },
   { name: '/mode', hint: '切换审批模式', message: { type: 'pickMode' } },
   { name: '/settings', hint: '模型服务与 Agent 设置', message: { type: 'openSettings' } },
@@ -82,6 +83,7 @@ export class ChatTui {
 
   /** 窗口打开之前收到的消息；打开后置为 undefined */
   private backlog: any[] | undefined = [];
+  private replacePending = false;
   /** 等待写出的定稿行 */
   private queue: string[] = [];
   /** 最后一行定稿内容是否为空行（用于控制块之间的间距） */
@@ -134,11 +136,11 @@ export class ChatTui {
     const backlog = this.backlog ?? [];
     this.backlog = undefined;
     this.banner();
-    // 宿主会在 ready 的同一次调用里同步回送状态与历史对话，
-    // 所以这里的顺序是：欢迎框 → 历史对话 → 窗口打开前就已经发生的消息
+    // 宿主在 ready 时补发历史与运行快照；快照已覆盖的对话事件不再重复播放。
+    // 独立通知和错误仍保留，例如手动运行命令的结果。
     this.opts.emit({ type: 'ready' });
     for (const msg of backlog) {
-      this.receive(msg);
+      if (!this.replacePending || msg.type === 'notice' || msg.type === 'error') this.receive(msg);
     }
     this.render();
     this.syncSpinner();
@@ -155,6 +157,10 @@ export class ChatTui {
 
   get isOpen(): boolean {
     return this.opened;
+  }
+
+  get draft(): string {
+    return this.editor.text;
   }
 
   setDimensions(cols: number, rows: number): void {
@@ -455,6 +461,13 @@ export class ChatTui {
         this.contextLabel = String(msg.label ?? '');
         break;
       case 'history':
+        this.replacePending = msg.replacePending === true;
+        if (typeof msg.draft === 'string') {
+          this.editor.clear();
+          this.editor.set(msg.draft);
+          this.slashIndex = 0;
+          this.pasteBuf = undefined;
+        }
         this.showHistory(Array.isArray(msg.messages) ? msg.messages : []);
         break;
       case 'user':
@@ -574,6 +587,9 @@ export class ChatTui {
         this.status = sanitize(String(msg.message ?? ''));
         break;
       case 'cleared':
+        this.editor.clear();
+        this.slashIndex = 0;
+        this.pasteBuf = undefined;
         this.md = undefined;
         this.segStarted = false;
         this.runningTools.clear();

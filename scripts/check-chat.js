@@ -730,21 +730,12 @@ async function main() {
   }
 
   {
-    const { server, seen } = createModelServer([{ text: '历史中的回答' }], { models: ['test-model', 'another-model'] });
+    resetUi();
+    const { server } = createModelServer([{ text: '历史中的回答' }]);
     const port = await listen(server);
     const t = setup(port);
-    await t.send({ type: 'getSettings' });
-    const values = t.posted.find((message) => message.type === 'settingsData').values;
-    expect('表单读取不会回显 Key', values.hasKey && !('apiKey' in values));
-    await t.send({ type: 'fetchModels', requestId: 1, values: { ...values, model: '' } });
-    expect('表单从草稿地址获取模型并保留配置', t.posted.at(-1).ok && t.posted.at(-1).models.includes('another-model') && configValues.model === 'test-model');
-    await t.send({ type: 'testConnection', requestId: 2, values });
-    expect('表单测试连接沿用已保存的 Key', t.posted.at(-1).ok);
-    await t.send({ type: 'saveSettings', requestId: 3, values: { ...values, contextWindow: 1 } });
-    expect('表单先验证全部字段，错误时不保存', !t.posted.at(-1).ok && configValues.contextWindow === undefined);
-    await t.send({ type: 'saveSettings', requestId: 4, values: { ...values, model: 'another-model', apiKey: 'form-secret' } });
-    expect('表单保存模型和安全存储 Key', t.posted.at(-1).ok && configValues.model === 'another-model' && t.getKey() === 'form-secret');
-    expect('表单保存结果不回传 Key', !JSON.stringify(t.posted).includes('form-secret'));
+    await t.controller.openHistory();
+    expect('没有历史会话时使用原生提示', ui.infos.some((message) => /还没有历史会话/.test(message)));
     await t.controller.handleUserText('第一条会话的问题');
     await t.send({ type: 'listSessions' });
     const firstId = t.posted.at(-1).activeId;
@@ -753,17 +744,22 @@ async function main() {
     await t.send({ type: 'selectSession', id: firstId, draft: '第二条的草稿' });
     const restored = [...t.posted].reverse().find((message) => message.type === 'history');
     expect('真实会话切换恢复消息和草稿', restored.messages[0].content === '第一条会话的问题' && restored.draft === '第一条的未发送草稿');
-    const secondServer = createModelServer([{ text: 'pong' }], { models: ['local-model'] });
-    const secondPort = await listen(secondServer.server);
-    const changed = { ...values, baseUrl: `http://127.0.0.1:${secondPort}/v1` };
-    await t.send({ type: 'fetchModels', requestId: 5, values: changed });
-    expect('变更 API 地址不会把旧 Key 发送到新服务', secondServer.seen.listAuth === undefined);
-    await t.send({ type: 'saveSettings', requestId: 6, values: changed });
-    expect('更换地址必须明确提供 Key 或清除旧 Key', !t.posted.at(-1).ok && t.getKey() === 'form-secret');
-    await t.send({ type: 'saveSettings', requestId: 7, values: { ...changed, clearKey: true } });
-    expect('本地模型可明确清除 Key 后保存', t.posted.at(-1).ok && !t.getKey());
-    expect('表单连接测试确实调用模型接口', seen.length >= 3);
-    server.close(); secondServer.server.close(); t.controller.dispose();
+    resetUi();
+    let draft = '原生终端未发送的内容';
+    t.surface.draft = () => draft;
+    const currentId = restored.sessionId;
+    const beforeCancel = t.posted.length;
+    await t.controller.openHistory();
+    expect('原生历史选择器可取消且不切换当前会话', ui.shownPicks.at(-1).opts.title === '历史会话' && ui.shownPicks.at(-1).items.some((item) => item.id === currentId) && !t.posted.slice(beforeCancel).some((message) => message.type === 'history'));
+    await t.controller.newSession();
+    const empty = [...t.posted].reverse().find((message) => message.type === 'history');
+    expect('原生新建会话保留旧会话草稿', empty.sessionId !== currentId && empty.messages.length === 0);
+    draft = '';
+    ui.picks.push(currentId);
+    await t.send({ type: 'openHistory' });
+    const picked = [...t.posted].reverse().find((message) => message.type === 'history');
+    expect('原生 QuickPick 选择后恢复会话与终端草稿', picked.sessionId === currentId && picked.draft === '原生终端未发送的内容');
+    server.close(); t.controller.dispose();
   }
   {
     const { server } = createModelServer([

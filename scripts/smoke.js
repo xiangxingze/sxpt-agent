@@ -1,7 +1,7 @@
 require('./source-loader');
 const Module = require('module');
 const path = require('path');
-const fs = require('node:fs/promises');
+const manifest = require('../package.json');
 
 const disposables = [];
 const commands = new Map();
@@ -81,6 +81,8 @@ const stub = {
       command: ''
     }),
     createTreeView: (id, options) => {
+      const declaration = Object.values(manifest.contributes.views).flat().find((view) => view.id === id);
+      if (!declaration || declaration.type === 'webview') throw new Error('No view is registered with id: ' + id);
       treeViews.push({ id, options });
       return { description: undefined, badge: undefined, dispose: () => {} };
     },
@@ -131,7 +133,7 @@ const stub = {
     asRelativePath: (p) => p,
     openTextDocument: async () => ({ getText: () => '', lineCount: 1, lineAt: () => ({ text: '' }), positionAt: () => ({}) }),
     applyEdit: async () => true,
-    fs: { writeFile: async () => {}, readFile: (uri) => fs.readFile(uri.fsPath) }
+    fs: { writeFile: async () => {} }
   },
   commands: {
     registerCommand: (id, handler) => {
@@ -231,40 +233,21 @@ async function main() {
     process.exitCode = 1;
   }
 
-  // 主面板使用 Webview，原生终端作为备用入口。
+  // 对照真实清单校验树视图类型，防止清单与运行注册方式不一致。
   const check = (name, cond) => {
     if (!cond) {
       console.error('FAIL ' + name);
       process.exitCode = 1;
     }
   };
-  check('注册了统一 Webview 面板', webviews.length === 1 && webviews[0].id === 'ptnAgent.sessionView' && treeViews.length === 0);
+  check('注册了原生树视图且没有 Webview', treeViews.length === 1 && treeViews[0].id === 'ptnAgent.sessionView' && webviews.length === 0);
+  const navigation = manifest.contributes.menus['view/title'].filter((item) => item.group.startsWith('navigation') && !item.when.includes('ptnAgent.busy'));
+  check('侧栏常驻操作只有新建、历史、设置', navigation.map((item) => item.command).join() === 'ptnAgent.newSession,ptnAgent.history,ptnAgent.settings');
+  check('原生欢迎页存在', manifest.contributes.viewsWelcome.every((entry) => entry.view === treeViews[0].id));
   check('注册了终端链接（文件:行号）', linkProviders.length === 1);
   check('激活时不创建对话终端', terminals.length === 0);
 
   await commands.get('ptnAgent.openChat')();
-  check('默认对话不会创建备用终端', terminals.length === 0);
-  const posted = [];
-  let receive;
-  let disposeView;
-  const panel = { visible: true, show() {},
-    onDidDispose: (handler) => { disposeView = handler; return disposable(); },
-    webview: { cspSource: 'https://test.webview.local',
-      asWebviewUri: (uri) => ({ toString: () => 'https://test.webview.local/' + path.basename(uri.fsPath) }),
-      onDidReceiveMessage: (handler) => { receive = handler; return disposable(); },
-      postMessage: async (message) => { posted.push(message); return true; }
-    }
-  };
-  await webviews[0].provider.openSettings();
-  await webviews[0].provider.resolveWebviewView(panel);
-  check('实际 HTML 已注入 CSP 与本地资源地址', !panel.webview.html.includes('{{') && panel.webview.html.includes("default-src 'none'") && panel.webview.html.includes('https://test.webview.local/chat.js'));
-  check('只允许加载 media 目录资源', panel.webview.options.enableScripts && panel.webview.options.localResourceRoots[0].fsPath === path.join(__dirname, '..', 'media'));
-  await receive({ type: 'ready' });
-  check('加载完成补发状态、历史与待打开设置页', posted.some((m) => m.type === 'state') && posted.some((m) => m.type === 'history') && posted.at(-1).panel === 'settings');
-  check('可见且完成加载的面板可以审批', webviews[0].provider.canApprove);
-  disposeView();
-  check('面板销毁后关闭内嵌审批入口', !webviews[0].provider.canApprove);
-  await commands.get('ptnAgent.openTerminalChat')();
   const term = terminals[0];
   check('打开对话会创建一个终端标签页', terminals.length === 1 && term.name === 'AI Agent' && term.options.pty && term.shown === 1);
   check('对话终端默认放在编辑器右侧', term && term.options.location && term.options.location.viewColumn === stub.ViewColumn.Beside);
@@ -280,11 +263,21 @@ async function main() {
   );
   await commands.get('ptnAgent.openTerminalChat')();
   check('再次打开复用同一个终端', terminals.length === 1 && term.shown === 2);
+  term.options.pty.handleInput('关闭前的草稿');
   term.options.pty.close();
+  await commands.get('ptnAgent.openChat')();
+  const reopened = terminals[1];
+  let restoredScreen = '';
+  reopened.options.pty.onDidWrite((data) => { restoredScreen += data; });
+  reopened.options.pty.open({ columns: 80, rows: 24 });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  check('关闭后重新打开原生终端会恢复草稿', restoredScreen.includes('关闭前的草稿'));
+  reopened.options.pty.close();
 
   if (!process.exitCode) {
     console.log('smoke test passed');
   }
+  for (const subscription of fakeContext.subscriptions) subscription.dispose();
   ext.deactivate();
 }
 
