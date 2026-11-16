@@ -48,7 +48,13 @@ jobs:
       - name: Remove development dependencies
         run: npm prune --omit=dev
 
+      - name: Package extension
+        run: npx --yes @vscode/vsce package --allow-missing-repository
+
       - name: Publish to Open VSX
-        run: npx --yes ovsx publish --skip-duplicate -p "$OVSX_PAT"
+        shell: bash
+        run: |
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          npx --yes ovsx publish --skip-duplicate -p "$OVSX_PAT" "./sxpt-agent-${PACKAGE_VERSION}.vsix"
         env:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
