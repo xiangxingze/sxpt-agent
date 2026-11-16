@@ -1,0 +1,67 @@
+name: Publish extension to Visual Studio Marketplace
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Build and publish sxpt-agent
+    runs-on: ubuntu-latest
+    env:
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile extension
+        run: npm run compile
+
+      - name: Check tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$PACKAGE_VERSION" != "$TAG_VERSION" ]; then
+            echo "package.json version $PACKAGE_VERSION does not match tag $GITHUB_REF_NAME"
+            exit 1
+          fi
+
+      - name: Check Marketplace token
+        shell: bash
+        run: |
+          if [ -z "$VSCE_PAT" ]; then
+            echo "::error::VSCE_PAT is not configured"
+            exit 1
+          fi
+
+      - name: Remove development dependencies
+        run: npm prune --omit=dev
+
+      - name: Package extension
+        run: npx --yes @vscode/vsce package --allow-missing-repository
+
+      - name: Publish to Visual Studio Marketplace
+        shell: bash
+        run: |
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          npx --yes @vscode/vsce publish \
+            --skip-duplicate \
+            --packagePath "./sxpt-agent-${PACKAGE_VERSION}.vsix" \
+            --pat "$VSCE_PAT"
