@@ -8,13 +8,12 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   publish:
     name: Build and publish sxpt-agent
     runs-on: ubuntu-latest
-    env:
-      VSCE_PAT: ${{ secrets.VSCE_PAT }}
 
     steps:
       - name: Checkout
@@ -43,14 +42,6 @@ jobs:
             exit 1
           fi
 
-      - name: Check Marketplace token
-        shell: bash
-        run: |
-          if [ -z "$VSCE_PAT" ]; then
-            echo "::error::VSCE_PAT is not configured"
-            exit 1
-          fi
-
       - name: Remove development dependencies
         run: npm prune --omit=dev
 
@@ -64,4 +55,4 @@ jobs:
           npx --yes @vscode/vsce publish \
             --skip-duplicate \
             --packagePath "./sxpt-agent-${PACKAGE_VERSION}.vsix" \
-            --pat "$VSCE_PAT"
+            --oidc
