@@ -1,7 +1,7 @@
 {
   "name": "sxpt-agent",
   "displayName": "SXPT AI Coding Agent",
-  "description": "实训平台内置 VS Code 的 AI 编程 Agent：原生终端对话、会话历史、QuickPick 设置、Diff 审核与撤销，支持局域网 HTTP code-server。",
+  "description": "实训平台内置 VS Code 的 AI 编程 Agent：按 V4 原型绘制的原生终端对话（欢迎页、消息气泡、确认卡片）、会话历史、QuickPick 设置、Diff 审核与撤销，支持局域网 HTTP code-server。",
   "version": "0.3.2",
   "publisher": "sxpt",
   "license": "MIT",
@@ -230,6 +230,28 @@
         {
           "command": "ptnAgent.openChat",
           "group": "3_chat@1"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "ptnAgent.stop",
+          "when": "resourceScheme == vscode-terminal && ptnAgent.chatActive && ptnAgent.busy",
+          "group": "navigation@0"
+        },
+        {
+          "command": "ptnAgent.newSession",
+          "when": "resourceScheme == vscode-terminal && ptnAgent.chatActive",
+          "group": "navigation@1"
+        },
+        {
+          "command": "ptnAgent.history",
+          "when": "resourceScheme == vscode-terminal && ptnAgent.chatActive",
+          "group": "navigation@2"
+        },
+        {
+          "command": "ptnAgent.settings",
+          "when": "resourceScheme == vscode-terminal && ptnAgent.chatActive",
+          "group": "navigation@3"
         }
       ],
       "view/title": [

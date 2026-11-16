@@ -1,10 +1,16 @@
 import * as vscode from 'vscode';
-import { ChatTui } from './chatTui';
+import { ChatTui, findActionLinks } from './chatTui';
 
 export const CHAT_TERMINAL_NAME = 'AI Agent';
 
 interface FileRefLink extends vscode.TerminalLink {
   ref: string;
+}
+
+/** 对话里可点击的链接：文件引用，或标题行 / 欢迎页上的操作 */
+interface ChatLink extends vscode.TerminalLink {
+  ref?: string;
+  action?: any;
 }
 
 const FILE_REF =
@@ -71,13 +77,24 @@ export class ChatTerminal implements vscode.Disposable {
           this.forget();
         }
       }),
-      // 对话里出现的「文件路径:行号」可以直接点击打开（Ctrl/Cmd + 单击）
+      // 对话里出现的「文件路径:行号」、标题行的 /new /history /settings、欢迎页的建议
+      // 都可以直接点击（Ctrl/Cmd + 单击）
       vscode.window.registerTerminalLinkProvider({
-        provideTerminalLinks: (context): FileRefLink[] =>
-          context.terminal === this.terminal ? findFileRefs(context.line) : [],
-        handleTerminalLink: (link: FileRefLink) => this.host.onMessage({ type: 'openFile', ref: link.ref })
+        provideTerminalLinks: (context): ChatLink[] =>
+          context.terminal === this.terminal ? [...findFileRefs(context.line), ...findActionLinks(context.line)] : [],
+        handleTerminalLink: (link: ChatLink) => this.openLink(link)
       })
     );
+  }
+
+  private openLink(link: ChatLink): void {
+    if (link.ref) {
+      this.host.onMessage({ type: 'openFile', ref: link.ref });
+    } else if (link.action?.type === 'fillPrompt') {
+      this.tui?.fillPrompt(String(link.action.text ?? ''));
+    } else if (link.action) {
+      this.host.onMessage(link.action);
+    }
   }
 
   /** 对话窗口存在时，审批直接在其中完成；否则宿主改用原生弹窗 */

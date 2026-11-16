@@ -1,8 +1,9 @@
 /**
  * 终端对话界面自检（不依赖 vscode）：
  *  - 基础：显示宽度、折行、清洗、Markdown → 终端文本、精简 Diff、行编辑器、文件引用识别
- *  - ChatTui：用一个最小的 VT 终端模拟器接收它的输出，检查屏幕上最终看到的内容——
- *    流式输出不留残影、审批卡片按键、斜杠命令、多行输入与粘贴、窗口缩放、打开前的消息重放。
+ *  - ChatTui（按 V4 原型绘制）：用一个最小的 VT 终端模拟器接收它的输出，检查屏幕上最终看到的内容——
+ *    欢迎页与贴底的输入框、消息气泡、流式输出不留残影、确认卡片按钮、斜杠命令、多行输入与粘贴、
+ *    窗口缩放、打开前的消息重放、可点击的标题行操作。
  */
 require('./source-loader');
 const Module = require('module');
@@ -21,7 +22,7 @@ const { style, stripAnsi, sanitize, charWidth, textWidth, padEnd, truncate, wrap
 const { renderInline, renderMarkdown, MarkdownStream } = require(out('markdownAnsi.js'));
 const { compactDiff } = require(out('diffLines.js'));
 const { LineEditor } = require(out('lineEditor.js'));
-const { ChatTui } = require(out('chatTui.js'));
+const { ChatTui, findActionLinks } = require(out('chatTui.js'));
 const { findFileRefs } = require(out('chatTerminal.js'));
 
 let fail = 0;
@@ -414,30 +415,89 @@ const ESC = '\x1b';
 }
 
 // ---------------------------------------------------------------------------
-// 6. ChatTui：打开、输入、发送
+// 6. ChatTui：欢迎页、输入框、发送
 // ---------------------------------------------------------------------------
+const PLACEHOLDER = '提问、修改代码，或描述你的想法…';
+const RIGHT = '\x1b[C';
+const LEFT = '\x1b[D';
+
+/** 屏幕上当前反色显示（选中）的审批按钮 */
+function selectedButton(t) {
+  const all = [...t.term.raw.matchAll(/\x1b\[7m\x1b\[1m ([^\x1b]+) \x1b\[22m/g)];
+  return all.length ? all[all.length - 1][1] : '';
+}
+
 {
   const t = mk({ unconfigured: true, cwd: '/home/student/demo' });
   expect('打开时启用括号粘贴模式并发出 ready', t.term.raw.startsWith('\x1b[?2004h') && t.emitted[0].type === 'ready');
-  expect('欢迎框', t.term.count('AI Coding Agent') === 1 && t.term.text().includes('/home/student/demo') && t.term.text().includes('都会先让你确认'), t.term.text());
-  expect('输入框带占位提示', t.term.count('描述你的任务，或输入 / 查看命令') === 1);
-  expect('未配置时提示去设置', t.term.text().includes('尚未配置模型服务'));
+  let rows = t.term.rowsText();
+  expect('空会话：标题行在最上方，带新建 / 历史 / 设置', /^✦ AI Agent\s+\/new 新建 · \/history 历史 · \/settings 设置$/.test(rows[0]), rows[0]);
+  expect('未配置时欢迎页引导配置', t.term.text().includes('先连接模型服务') && t.term.text().includes('按 Enter 开始配置') && t.term.text().includes('● 请先配置模型'), t.term.text());
+  expect('输入框贴在屏幕底部', rows.length === 30 && rows[29].includes('尚未配置模型服务'), `${rows.length} ${rows[rows.length - 1]}`);
   t.key(ENTER);
   expect('未配置时直接回车打开设置', t.last().type === 'openSettings');
+  t.key('先写好的问题');
+  t.key(ENTER);
+  expect('未配置时发送会打开设置并保留输入', t.last().type === 'openSettings' && t.tui.draft === '先写好的问题' && !t.emitted.some((m) => m.type === 'send'));
+  t.key('\x03');
 
   t.tui.receive({ type: 'state', configured: true, model: 'qwen-coder', mode: 'autoEdit', contextLabel: 'main.py · L3' });
-  expect('状态行显示上下文、模型与审批模式', /main\.py · L3 · qwen-coder · 自动应用修改/.test(t.term.text()) && !t.term.text().includes('尚未配置'), t.term.text());
+  let text = t.term.text();
+  expect('已配置：欢迎语与两条建议', text.includes('有什么想一起完成的？') && text.includes('了解这个项目 ↗') && text.includes('分析当前报错 ↗') && !text.includes('先连接模型服务'), text);
+  expect('输入框上方显示当前文件，框内显示模型', text.includes('▧ main.py · L3') && /│ ● qwen-coder\s+↑ │/.test(text), text);
+  expect('提示随审批模式变化：自动修改', text.includes('运行命令前会请你确认') && !text.includes('尚未配置'), text);
+  t.tui.receive({ type: 'state', mode: 'readOnly' });
+  expect('提示随审批模式变化：只读', t.term.text().includes('当前为只读模式'));
+  t.tui.receive({ type: 'state', mode: 'ask' });
+  expect('提示随审批模式变化：逐项确认', t.term.text().includes('修改前会请你确认'));
+  t.tui.receive({ type: 'state', autoEdits: true });
+  expect('本次会话自动允许修改时的提示', t.term.text().includes('本次会话自动允许修改'));
+  t.tui.receive({ type: 'state', autoEdits: false });
+  expect('输入框带占位提示', t.term.count(PLACEHOLDER) === 1);
+
+  t.key('\t');
+  expect('空输入框按 Tab 填入第一条建议', t.tui.draft === '帮我理解这个项目的结构', t.tui.draft);
+  t.key('\t');
+  expect('再按 Tab 换下一条建议', t.tui.draft === '帮我分析当前的报错，先说明原因', t.tui.draft);
+  t.key('\x03');
+  t.tui.fillPrompt('点击建议\x1b[2J填入');
+  expect('点击建议填入输入框（外部文本被清洗）', t.tui.draft === '点击建议[2J填入', JSON.stringify(t.tui.draft));
+  t.key('\x03');
 
   t.key('你好');
-  expect('输入的文字出现在输入框里', t.term.count('│ > 你好') === 1 && t.term.count('描述你的任务') === 0, t.term.text());
-  expect('光标停在输入文字之后', t.term.cursorVisible && t.term.x === 8 && t.term.cursorLine().startsWith('│ > 你好'), `${t.term.x} ${t.term.cursorLine()}`);
+  expect('输入的文字出现在输入框里', t.term.count('│ 你好') === 1 && t.term.count(PLACEHOLDER) === 0, t.term.text());
+  expect('光标停在输入文字之后', t.term.cursorVisible && t.term.x === 6 && t.term.cursorLine().startsWith('│ 你好'), `${t.term.x} ${t.term.cursorLine()}`);
   t.key('\x7f');
-  expect('退格', t.term.count('│ > 你 ') === 1 && t.term.x === 6, t.term.cursorLine());
+  expect('退格', t.term.count('│ 你 ') === 1 && t.term.x === 4, t.term.cursorLine());
   t.key('好，帮我看看');
   t.key(ENTER);
   expect('回车发送', t.last().type === 'send' && t.last().text === '你好，帮我看看', JSON.stringify(t.last()));
-  expect('发送后输入框清空', t.term.count('描述你的任务') === 1);
+  expect('发送后输入框清空', t.term.count(PLACEHOLDER) === 1);
   expect('没有出现自动折行', t.term.wraps === 0, String(t.term.wraps));
+  rows = t.term.rowsText();
+  expect('重画后屏幕仍然正好一屏', rows.length === 30, String(rows.length));
+}
+
+// 屏幕很矮时欢迎页自动精简，不超出屏幕
+{
+  const t = mk({ cols: 60, rows: 12 });
+  const text = t.term.text();
+  expect('矮屏幕：只保留欢迎标题', text.includes('有什么想一起完成的？') && !text.includes('Tab 填入建议') && t.term.rowsText().length <= 12, text);
+  expect('矮屏幕：没有自动折行', t.term.wraps === 0);
+}
+
+// 可点击的操作（标题行、建议）
+{
+  const header = '✦ AI Agent           /new 新建 · /history 历史 · /settings 设置';
+  const links = findActionLinks(header);
+  expect(
+    '标题行的 /new /history /settings 可点击',
+    links.map((l) => l.action.type).join() === 'newSession,openHistory,openSettings' && links.every((l) => header.substr(l.startIndex, l.length).startsWith('/')),
+    JSON.stringify(links)
+  );
+  const pill = findActionLinks('                      ( 了解这个项目 ↗ )');
+  expect('欢迎页的建议可点击并填入输入框', pill.length === 1 && pill[0].action.type === 'fillPrompt' && pill[0].action.text === '帮我理解这个项目的结构', JSON.stringify(pill));
+  expect('普通对话内容里的 /new 不会变成链接', findActionLinks('  输入 /new 可以新建对话，/settings 打开设置').length === 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -472,23 +532,26 @@ function runAnswer(t, chunks) {
 {
   const t = mk();
   runAnswer(t, [ANSWER.slice(0, 30), ANSWER.slice(30, 31), ANSWER.slice(31, 90), ANSWER.slice(90)]);
-  expect('运行中显示状态行与停止提示', /正在思考… \(\d+s · Esc 停止\)/.test(t.term.text()), t.term.text());
+  expect('运行中显示状态行与停止提示', /正在思考… \(\d+s · Esc 停止\)/.test(t.term.text()) && /│ ● test-model\s+■ │/.test(t.term.text()), t.term.text());
   expect('流式过程中未结束的最后一行也可见', t.term.count('最后一句没有换行') === 1);
+  expect('有了对话内容后欢迎页消失', t.term.count('有什么想一起完成的？') === 0);
   t.tui.receive({ type: 'assistantEnd', id: 'a1', meta: 'test-model · 1.2s' });
   t.tui.receive({ type: 'state', busy: false });
   const text = t.term.text();
   const rows = t.term.rowsText();
-  expect('用户消息以 > 开头', rows.includes('> 分析一下'), text);
-  expect('回答第一行带 ●，后续行缩进', rows.includes('● 分析结果') && rows.includes('  这是粗体和 code，文件在 src/app.ts:12。'), text);
+  expect('标题行 + 会话标题', /^✦ AI Agent\s+\/new/.test(rows[0]) && rows[1] === '分析一下', `${rows[0]}\n${rows[1]}`);
+  const bubble = rows.find((r) => r.includes('│ 分析一下 │'));
+  expect('用户消息为右对齐的气泡', !!bubble && /^ +│ 分析一下 │$/.test(bubble) && textWidth(bubble) === 79 && rows.some((r) => /^ +╭─+╮$/.test(r)), text);
+  expect('回答以「✦ AI Agent」开头，正文缩进', rows.includes('✦ AI Agent') && rows[rows.indexOf('✦ AI Agent') + 1] === '  分析结果' && rows.includes('  这是粗体和 code，文件在 src/app.ts:12。'), text);
   expect('列表、代码块、表格都渲染出来', rows.includes('  • 列表一') && rows.includes('  ╭─ js') && rows.includes('  │ const a = 1;') && rows.includes('  ╰─') && /│ 1\s+│ 二\s+│/.test(text), text);
   expect('Markdown 标记没有残留', !/\*\*|```|\|---/.test(text), text);
   expect(
     '重绘不留残影（每块内容只出现一次）',
-    ['分析结果', '列表二', 'const a = 1;', '最后一句没有换行', '> 分析一下', '列A'].every((s) => t.term.count(s) === 1),
+    ['分析结果', '列表二', 'const a = 1;', '最后一句没有换行', '│ 分析一下 │', '列A'].every((s) => t.term.count(s) === 1),
     text
   );
-  expect('结束后显示统计信息并恢复输入框', rows.includes('  test-model · 1.2s') && t.term.count('描述你的任务') === 1 && !/正在思考/.test(text), text);
-  expect('输入框在最下方且光标在其中', t.term.cursorLine().startsWith('│ > ') && t.term.x === 4 && t.term.cursorVisible, t.term.cursorLine());
+  expect('结束后显示统计信息并恢复输入框', rows.includes('  test-model · 1.2s') && t.term.count(PLACEHOLDER) === 1 && !/正在思考/.test(text), text);
+  expect('输入框在最下方且光标在其中', t.term.cursorLine().startsWith('│ ') && t.term.x === 2 && t.term.cursorVisible, t.term.cursorLine());
   expect('流式输出没有自动折行', t.term.wraps === 0, String(t.term.wraps));
 
   // 逐字到达与一次到达，最终屏幕完全一致
@@ -514,7 +577,7 @@ function runAnswer(t, chunks) {
   t.tui.receive({ type: 'textDelta', text: '\n\n结束。' });
   t.tui.receive({ type: 'assistantEnd', id: 'a1', meta: '' });
   t.tui.receive({ type: 'state', busy: false });
-  const got = (t.term.text().match(/[\uac00-\ud7a3]/g) || []).join('');
+  const got = (t.term.text().match(/[가-힣]/g) || []).join('');
   expect('超过屏幕高度的长段落完整显示且不重复', got === long, `${got.length} / ${long.length}`);
   expect('长段落之后的内容正常', t.term.count('结束。') === 1 && t.term.wraps === 0, String(t.term.wraps));
 }
@@ -528,9 +591,10 @@ function runAnswer(t, chunks) {
   t.tui.receive({ type: 'toolEnd', id: 't1', name: 'bash', ok: true, summary: '退出码 0', output: 'out\x1b[3J\x1b[H\nline2' });
   t.tui.receive({ type: 'error', message: '失败\x1b[2J' });
   t.tui.receive({ type: 'notice', text: '提示\x1b[2J' });
+  t.tui.receive({ type: 'user', text: '气泡\x1b[2J里' });
   const written = t.term.raw.slice(before);
   expect('外部文本里的 ESC 序列被清洗', !/\x1b\[2J|\x1b\[3J|\x1b\]|\x1b\[H|\x9b|\x07/.test(written), JSON.stringify(written.match(/\x1b\[[23]J|\x1b\]|\x1b\[H/g)));
-  expect('清洗后文字仍然显示', t.term.text().includes('危险[2J') && t.term.text().includes('内容'), t.term.text());
+  expect('清洗后文字仍然显示', t.term.text().includes('危险[2J') && t.term.text().includes('内容') && t.term.text().includes('气泡[2J里'), t.term.text());
 }
 
 // 请求重试：未完成的半行作废
@@ -541,6 +605,19 @@ function runAnswer(t, chunks) {
   t.tui.receive({ type: 'textDelta', text: '重新回答。\n' });
   t.tui.receive({ type: 'assistantEnd', id: 'a1', meta: '' });
   expect('textReset 丢弃未定稿的文本', t.term.count('半句话还没') === 0 && t.term.count('重新回答。') === 1, t.term.text());
+}
+
+// 很长的用户消息在气泡里折行，多行消息保留换行
+{
+  const t = mk({ cols: 50 });
+  t.tui.receive({ type: 'user', text: '第一行\n' + '很长的消息'.repeat(12) });
+  const rows = t.term.rowsText().filter((r) => /^ +│/.test(r));
+  expect(
+    '长消息在气泡里折行且右边对齐',
+    rows.length >= 4 && rows[0].includes('│ 第一行') && new Set(rows.map((r) => textWidth(r))).size === 1 && textWidth(rows[0]) === 49,
+    t.term.text()
+  );
+  expect('气泡没有自动折行', t.term.wraps === 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -584,17 +661,24 @@ const EDIT_REQUEST = {
   t.tui.receive({ type: 'approval', request: EDIT_REQUEST });
   t.tui.receive({ type: 'approval', request: EDIT_REQUEST });
   let text = t.term.text();
-  expect('审批卡片：标题、统计、Diff 行', /╭─ 修改 a\.txt · \+1 −1 ─+╮/.test(text) && /│\s+2 - beta\s+│/.test(text) && /│\s+2 \+ BETA\s+│/.test(text), text);
-  expect('审批卡片：问题与三个选项', text.includes('要应用这次修改吗？') && /❯ 1\. 允许\n\s+2\. 允许，并且本次会话不再询问文件修改\n\s+3\. 拒绝/.test(text), text);
-  expect('重复的审批消息不会出现两张卡片', t.term.count('要应用这次修改吗？') === 1);
-  expect('审批时隐藏输入框与光标', t.term.count('描述你的任务') === 0 && !t.term.cursorVisible);
+  expect('确认卡片：标题「等待你确认」、修改说明与统计', /╭─ 等待你确认 ─+╮/.test(text) && /│ 修改 a\.txt · \+1 −1\s+│/.test(text), text);
+  expect('确认卡片：Diff 行', /│\s+2 - beta\s+│/.test(text) && /│\s+2 \+ BETA\s+│/.test(text), text);
+  expect('确认卡片：横排按钮', /查看修改 {4}允许修改 {4}本次会话都允许 {4}暂不修改/.test(text), text);
+  expect('默认选中「允许修改」', selectedButton(t) === '允许修改', selectedButton(t));
+  expect('重复的审批消息不会出现两张卡片', t.term.count('等待你确认') === 1);
+  expect('审批时隐藏输入框与光标', t.term.count(PLACEHOLDER) === 0 && !t.term.cursorVisible);
   const n = t.emitted.length;
   t.key('随便打字');
   expect('审批时的普通按键不会进入输入框或触发决定', t.emitted.length === n);
   t.key('d');
-  expect('d 重新打开 Diff', t.last().type === 'openDiff' && t.last().id === 'p1');
-  t.key(DOWN);
-  expect('↓ 移动选项', /❯ 2\. 允许，并且/.test(t.term.text()), t.term.text());
+  expect('d 查看修改', t.last().type === 'openDiff' && t.last().id === 'p1');
+  t.key(LEFT);
+  expect('← 移到「查看修改」', selectedButton(t) === '查看修改', selectedButton(t));
+  const before = t.emitted.length;
+  t.key(ENTER);
+  expect('在「查看修改」上回车打开 Diff，卡片保留', t.emitted.length === before + 1 && t.last().type === 'openDiff' && t.term.count('等待你确认') === 1);
+  t.key(RIGHT + RIGHT);
+  expect('→ 移动选项', selectedButton(t) === '本次会话都允许', selectedButton(t));
   t.key(ENTER);
   expect('Enter 确认当前选项', t.last().type === 'approvalResponse' && t.last().decision === 'allowAllEdits' && t.last().id === 'p1', JSON.stringify(t.last()));
   const m = t.emitted.length;
@@ -604,22 +688,27 @@ const EDIT_REQUEST = {
   t.tui.receive({ type: 'approvalDone', id: 'p1', decision: 'allowAllEdits' });
   t.tui.receive({ type: 'toolEnd', id: 't2', name: 'edit', ok: true, summary: '+1 −1' });
   text = t.term.text();
-  expect('审批结束后卡片消失', t.term.count('要应用这次修改吗？') === 0 && t.term.count('╭─ 修改 a.txt') === 0, text);
-  expect('写入结果带统计与 Diff', /● 修改 a\.txt\n\s+⎿ 已写入（\+1 −1）\n\s+1 {3}alpha\n\s+2 - beta\n\s+2 \+ BETA/.test(text), text);
+  expect('审批结束后卡片消失、输入框恢复', t.term.count('等待你确认') === 0 && t.term.count(PLACEHOLDER) === 1, text);
+  expect('写入结果带统计与 Diff', /● 修改 a\.txt\n\s+⎿ ✓ 已修改（\+1 −1）\n\s+1 {3}alpha\n\s+2 - beta\n\s+2 \+ BETA/.test(text), text);
   expect('提示本次会话后续修改自动允许', text.includes('本次会话后续的文件修改将自动允许'));
 
-  // 运行命令的审批：只有两个选项
+  // 运行命令的审批：只有两个按钮
   t.tui.receive({ type: 'toolStart', id: 't3', name: 'bash', label: '运行 npm test' });
   t.tui.receive({ type: 'approval', request: { id: 'p2', kind: 'bash', title: '运行命令', command: 'npm test', cwd: '/ws' } });
   text = t.term.text();
-  expect('命令审批卡片', text.includes('要运行这条命令吗？') && /│ npm test\s+│/.test(text) && text.includes('工作目录：/ws') && !text.includes('3. 拒绝'), text);
+  expect(
+    '命令确认卡片',
+    /允许运行 {4}暂不运行/.test(text) && /│ npm test\s+│/.test(text) && text.includes('工作目录：/ws') && !text.includes('本次会话都允许') && !text.includes('d 查看修改'),
+    text
+  );
+  expect('命令确认默认选中「允许运行」', selectedButton(t) === '允许运行');
   t.key('3');
-  expect('不存在的选项编号被忽略', t.last().type !== 'approvalResponse' || t.last().id !== 'p2');
+  expect('不存在的按钮编号被忽略', t.last().type !== 'approvalResponse' || t.last().id !== 'p2');
   t.key(ESC);
-  expect('Esc 拒绝', t.last().type === 'approvalResponse' && t.last().decision === 'deny' && t.last().id === 'p2', JSON.stringify(t.last()));
+  expect('Esc 暂不运行', t.last().type === 'approvalResponse' && t.last().decision === 'deny' && t.last().id === 'p2', JSON.stringify(t.last()));
   t.tui.receive({ type: 'approvalDone', id: 'p2', decision: 'deny' });
   t.tui.receive({ type: 'toolEnd', id: 't3', name: 'bash', ok: false, summary: '用户拒绝' });
-  expect('被拒绝的操作标为已拒绝', /● 运行 npm test\n\s+⎿ 已拒绝/.test(t.term.text()), t.term.text());
+  expect('被拒绝的命令标为暂不运行', /● 运行 npm test\n\s+⎿ 你选择了暂不运行/.test(t.term.text()), t.term.text());
 
   // 命令输出预览
   t.tui.receive({ type: 'toolStart', id: 't4', name: 'bash', label: '运行 npm test' });
@@ -641,13 +730,26 @@ const EDIT_REQUEST = {
   expect('修改汇总与撤销提示', /● 本次修改了 1 个文件\n\s+⎿ a\.txt\n\s+输入 \/undo 可撤销本次修改/.test(text), text);
   expect('工具与审批流程没有自动折行', t.term.wraps === 0, String(t.term.wraps));
 
-  // 数字键与 y / n
-  for (const [keys, decision] of [['1', 'allow'], ['2', 'allowAllEdits'], ['3', 'deny'], ['y', 'allow'], ['n', 'deny'], [UP + ENTER, 'deny']]) {
+  // 被拒绝的文件修改
+  const d = mk();
+  d.tui.receive({ type: 'toolStart', id: 'x', name: 'edit', label: '修改 b.txt' });
+  d.tui.receive({ type: 'approval', request: { ...EDIT_REQUEST, id: 'px' } });
+  d.key('n');
+  d.tui.receive({ type: 'approvalDone', id: 'px', decision: 'deny' });
+  d.tui.receive({ type: 'toolEnd', id: 'x', name: 'edit', ok: false, summary: '用户拒绝' });
+  expect('被拒绝的修改标为暂不修改', /● 修改 b\.txt\n\s+⎿ 你选择了暂不修改，文件没有改动/.test(d.term.text()), d.term.text());
+
+  // 数字键、y / n、方向键
+  for (const [keys, decision] of [['2', 'allow'], ['3', 'allowAllEdits'], ['4', 'deny'], ['y', 'allow'], ['n', 'deny'], [ESC, 'deny'], [ENTER, 'allow'], [RIGHT + ENTER, 'allowAllEdits'], ['\t\t' + ENTER, 'deny']]) {
     const a = mk();
     a.tui.receive({ type: 'approval', request: EDIT_REQUEST });
     a.key(keys);
     expect(`审批按键 ${JSON.stringify(keys)} → ${decision}`, a.last().type === 'approvalResponse' && a.last().decision === decision, JSON.stringify(a.last()));
   }
+  const one = mk();
+  one.tui.receive({ type: 'approval', request: EDIT_REQUEST });
+  one.key('1');
+  expect('数字 1 是「查看修改」', one.last().type === 'openDiff' && one.term.count('等待你确认') === 1);
 
   // 防误触：卡片刚出现时的按键不生效
   const g = mk({ guard: 60000 });
@@ -661,11 +763,16 @@ const EDIT_REQUEST = {
   const q = mk();
   q.tui.receive({ type: 'approval', request: EDIT_REQUEST });
   q.tui.receive({ type: 'approval', request: { id: 'p9', kind: 'bash', title: '运行命令', command: 'ls' } });
-  q.key('1');
+  q.key('2');
   q.tui.receive({ type: 'approvalDone', id: 'p1', decision: 'allow' });
-  expect('前一个审批结束后显示下一个', q.term.text().includes('要运行这条命令吗？') && q.term.count('要应用这次修改吗？') === 0, q.term.text());
+  expect('前一个审批结束后显示下一个', q.term.text().includes('允许运行') && q.term.count('允许修改') === 0, q.term.text());
   q.key('1');
   expect('第二个审批独立回应', q.last().id === 'p9' && q.last().decision === 'allow');
+
+  // 窄窗口：按钮折成两行，不超宽
+  const narrow = mk({ cols: 36, rows: 30 });
+  narrow.tui.receive({ type: 'approval', request: EDIT_REQUEST });
+  expect('窄窗口里按钮自动折行且不超宽', narrow.term.text().includes('暂不修改') && narrow.term.wraps === 0, narrow.term.text());
 }
 
 // 停止时仍在运行的工具
@@ -692,13 +799,13 @@ const EDIT_REQUEST = {
   expect('输入 / 列出命令', /❯ \/new\s+新建对话/.test(text) && text.includes('/model') && text.includes('/settings'), text);
   t.key('mo');
   text = t.term.text();
-  expect('继续输入会过滤命令', /❯ \/model\s+切换模型\n\s+\/mode\s+切换审批模式/.test(text) && !text.includes('/new'), text);
+  expect('继续输入会过滤命令', /❯ \/model\s+切换模型\n\s+\/mode\s+切换操作确认方式/.test(text) && !text.includes('/new 新建对话'), text);
   t.key(DOWN);
   expect('↓ 选择下一条命令', /❯ \/mode /.test(t.term.text()), t.term.text());
   t.key('\t');
-  expect('Tab 补全', t.term.count('│ > /mode ') === 1, t.term.text());
+  expect('Tab 补全', t.term.count('│ /mode ') === 1, t.term.text());
   t.key(ENTER);
-  expect('回车执行命令', t.last().type === 'pickMode' && t.term.count('描述你的任务') === 1, JSON.stringify(t.last()));
+  expect('回车执行命令', t.last().type === 'pickMode' && t.term.count(PLACEHOLDER) === 1, JSON.stringify(t.last()));
 
   const run = (input) => {
     t.key(input);
@@ -720,19 +827,19 @@ const EDIT_REQUEST = {
   t.key(ENTER);
   expect('未知命令给出提示且不发送', t.emitted.length === n && t.term.text().includes('未知命令 /nope'), t.term.text());
   t.key('\x03');
-  expect('Ctrl+C 清空输入', t.term.count('描述你的任务') === 1);
+  expect('Ctrl+C 清空输入', t.term.count(PLACEHOLDER) === 1);
   t.key('\x03');
   expect('空输入时 Ctrl+C 给出提示', t.term.text().includes('关闭这个标签页即可结束对话'));
   t.key('/help');
   t.key(ENTER);
-  expect('/help 显示命令与按键说明', t.term.text().includes('● 命令') && t.term.text().includes('Shift+Enter') && t.emitted.length === n, t.term.text());
+  expect('/help 显示命令与按键说明', t.term.text().includes('● 命令') && t.term.text().includes('Shift+Enter') && t.term.text().includes('等待确认时') && t.emitted.length === n, t.term.text());
 
   // 任务运行中
   t.tui.receive({ type: 'state', busy: true });
   const b = t.emitted.length;
   t.key('再发一条');
   t.key(ENTER);
-  expect('运行中不能发送新消息，输入保留', t.emitted.length === b && t.term.text().includes('按 Esc 停止后再发送') && t.term.count('│ > 再发一条') === 1, t.term.text());
+  expect('运行中不能发送新消息，输入保留', t.emitted.length === b && t.term.text().includes('按 Esc 停止后再发送') && t.term.count('│ 再发一条') === 1, t.term.text());
   t.key('\x15');
   t.key('/new');
   t.key(ENTER);
@@ -753,8 +860,8 @@ const EDIT_REQUEST = {
   t.key('\x1b\r');
   t.key('第二行');
   let text = t.term.text();
-  expect('Shift+Enter（ESC CR）换行', /│ > 第一行\s+│\n│ {3}第二行\s+│/.test(text), text);
-  expect('光标在第二行末尾', t.term.x === 10 && t.term.cursorLine().includes('第二行'), `${t.term.x} ${t.term.cursorLine()}`);
+  expect('Shift+Enter（ESC CR）换行', /│ 第一行\s+│\n│ 第二行\s+│/.test(text), text);
+  expect('光标在第二行末尾', t.term.x === 8 && t.term.cursorLine().includes('第二行'), `${t.term.x} ${t.term.cursorLine()}`);
   t.key(ENTER);
   expect('多行内容一起发送', t.last().type === 'send' && t.last().text === '第一行\n第二行', JSON.stringify(t.last()));
 
@@ -762,12 +869,12 @@ const EDIT_REQUEST = {
   t.key('行尾反斜杠\\');
   t.key(ENTER);
   t.key('续行');
-  expect('行尾 \\ 加回车换行而不发送', t.emitted.length === n && /│ > 行尾反斜杠\s+│\n│ {3}续行/.test(t.term.text()), t.term.text());
+  expect('行尾 \\ 加回车换行而不发送', t.emitted.length === n && /│ 行尾反斜杠\s+│\n│ 续行/.test(t.term.text()), t.term.text());
   t.key(ENTER);
   expect('随后回车发送', t.last().text === '行尾反斜杠\n续行', JSON.stringify(t.last()));
 
   t.key('\x1b[200~粘贴一\r\n粘贴二\n\x1b[201~');
-  expect('粘贴的多行文本不会被当成回车发送', t.last().text === '行尾反斜杠\n续行' && /│ > 粘贴一\s+│\n│ {3}粘贴二/.test(t.term.text()), t.term.text());
+  expect('粘贴的多行文本不会被当成回车发送', t.last().text === '行尾反斜杠\n续行' && /│ 粘贴一\s+│\n│ 粘贴二/.test(t.term.text()), t.term.text());
   t.key('\x03');
   t.key('\x1b[200~分段');
   t.key('到达\nok');
@@ -776,7 +883,7 @@ const EDIT_REQUEST = {
   expect('分多次到达的粘贴内容', t.last().text === '分段到达\nok!', JSON.stringify(t.last()));
 
   t.key(UP);
-  expect('↑ 取回上一条输入', /│ > 分段到达/.test(t.term.text()), t.term.text());
+  expect('↑ 取回上一条输入', /│ 分段到达/.test(t.term.text()), t.term.text());
   t.key('\x03');
   t.key('abc def');
   t.key('\x17');
@@ -815,7 +922,7 @@ const EDIT_REQUEST = {
   t.tui.receive({ type: 'textDelta', text: '运行中的回复' });
   t.tui.receive({ type: 'notice', text: '手动命令已经完成' });
   t.tui.open(80, 30);
-  expect('宿主补发运行快照后不会重复显示打开前的消息', t.term.count('正在运行的请求') === 1 && t.term.count('运行中的回复') === 1 && t.tui.draft === '下一条草稿', t.term.text());
+  expect('宿主补发运行快照后不会重复显示打开前的消息', t.term.count('│ 正在运行的请求 │') === 1 && t.term.count('运行中的回复') === 1 && t.tui.draft === '下一条草稿', t.term.text());
   expect('补发会话后仍保留打开前的独立操作通知', t.term.count('手动命令已经完成') === 1);
 }
 
@@ -829,29 +936,35 @@ const EDIT_REQUEST = {
     ]
   });
   let text = t.term.text();
-  expect('恢复之前的对话', text.includes('之前的对话（最近 2 条）') && text.includes('> 旧问题') && text.includes('● 旧回答，含粗体。') && text.includes('以上为历史'), text);
+  let rows = t.term.rowsText();
+  expect(
+    '恢复之前的对话',
+    rows[1] === '旧问题' && text.includes('│ 旧问题 │') && /✦ AI Agent\n  旧回答，含粗体。/.test(text) && text.includes('以上是之前的对话') && t.term.count('有什么想一起完成的？') === 0,
+    text
+  );
 
   runAnswer(t, ['新的回答。\n']);
   t.tui.receive({ type: 'assistantEnd', id: 'a1', meta: '' });
   t.tui.receive({ type: 'state', busy: false });
+  expect('同一会话里只有一个标题行', t.term.count('/settings 设置') === 1, t.term.text());
   t.tui.receive({ type: 'cleared' });
   text = t.term.text();
-  expect('新建对话后清屏并重新显示欢迎框', t.term.count('AI Coding Agent') === 1 && !text.includes('旧问题') && !text.includes('新的回答') && t.term.count('描述你的任务') === 1, text);
-  expect('清屏后欢迎框在最上方', t.term.rowsText()[0].startsWith('╭'), t.term.rowsText()[0]);
+  expect('新建对话后清屏并重新显示欢迎页', t.term.count('有什么想一起完成的？') === 1 && !text.includes('旧问题') && !text.includes('新的回答') && t.term.count(PLACEHOLDER) === 1, text);
+  expect('清屏后标题行在最上方', t.term.rowsText()[0].startsWith('✦ AI Agent'), t.term.rowsText()[0]);
 
   // 变宽
   t.key('缩放前的输入');
   t.term.resize(120, 40);
   t.tui.setDimensions(120, 40);
   t.key('!');
-  expect('窗口变宽后只有一个输入框', t.term.count('│ > 缩放前的输入!') === 1 && t.term.count('╰') === 2, t.term.text());
+  expect('窗口变宽后只有一个输入框', t.term.count('│ 缩放前的输入!') === 1 && t.term.count('╰') === 1 && t.term.count('/settings 设置') === 1, t.term.text());
   // 变窄：原来的长行被终端折成多行
   t.term.resize(40, 20);
   t.tui.setDimensions(40, 20);
   t.key('?');
   text = t.term.text();
-  expect('窗口变窄后只有一个输入框', t.term.count('│ > 缩放前的输入!?') === 1, text);
-  expect('窗口变窄后输入框下方有状态行', /│ > 缩放前的输入!\?\s+│\n╰─+╯\n {2}\S/.test(text), text);
+  expect('窗口变窄后只有一个输入框', t.term.count('│ 缩放前的输入!?') === 1 && t.term.count('╰') === 1, text);
+  expect('窗口变窄后输入框下方有提示行', /│ 缩放前的输入!\?\s+│\n(│.*│\n)+╰─+╯\n *\S/.test(text), text);
   expect('窗口变窄后的重绘每行都不超宽', t.term.wraps === 0, String(t.term.wraps));
   t.key(ENTER);
   expect('缩放后仍能发送', t.last().text === '缩放前的输入!?');
@@ -880,12 +993,12 @@ const EDIT_REQUEST = {
   const text = t.term.text();
   const at = (s) => text.indexOf(s);
   expect(
-    '打开后的顺序：欢迎框 → 历史 → 打开前的消息',
-    at('AI Coding Agent') >= 0 && at('AI Coding Agent') < at('旧问题') && at('旧回答') < at('> 新问题') && at('> 新问题') < at('新回答第一句。'),
+    '打开后的顺序：标题行 → 历史 → 打开前的消息',
+    at('✦ AI Agent') === 0 && at('│ 旧问题 │') > 0 && at('│ 旧问题 │') < at('旧回答') && at('旧回答') < at('│ 新问题 │') && at('│ 新问题 │') < at('新回答第一句。'),
     text
   );
-  expect('打开前就在等待的审批只显示一张卡片', t.term.count('要应用这次修改吗？') === 1, text);
-  t.key('1');
+  expect('打开前就在等待的审批只显示一张卡片', t.term.count('等待你确认') === 1, text);
+  t.key('2');
   expect('重放后的审批可以回应', t.last().type === 'approvalResponse' && t.last().id === 'p1');
   t.tui.dispose();
   t.tui.receive({ type: 'notice', text: '关闭后的消息' });

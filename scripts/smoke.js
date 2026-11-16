@@ -244,6 +244,12 @@ async function main() {
   const navigation = manifest.contributes.menus['view/title'].filter((item) => item.group.startsWith('navigation') && !item.when.includes('ptnAgent.busy'));
   check('侧栏常驻操作只有新建、历史、设置', navigation.map((item) => item.command).join() === 'ptnAgent.newSession,ptnAgent.history,ptnAgent.settings');
   check('原生欢迎页存在', manifest.contributes.viewsWelcome.every((entry) => entry.view === treeViews[0].id));
+  const titleButtons = manifest.contributes.menus['editor/title'] || [];
+  check(
+    '对话标签页标题栏有新建、历史、设置（与原型顶部图标一致）',
+    titleButtons.filter((item) => !item.when.includes('ptnAgent.busy')).map((item) => item.command).join() === 'ptnAgent.newSession,ptnAgent.history,ptnAgent.settings' &&
+      titleButtons.every((item) => item.when.includes('ptnAgent.chatActive') && item.when.includes('resourceScheme == vscode-terminal'))
+  );
   check('注册了终端链接（文件:行号）', linkProviders.length === 1);
   check('激活时不创建对话终端', terminals.length === 0);
 
@@ -255,7 +261,10 @@ async function main() {
   term.options.pty.onDidWrite((d) => (screen += d));
   term.options.pty.open({ columns: 80, rows: 24 });
   await new Promise((r) => setTimeout(r, 50));
-  check('对话终端打开后绘制了欢迎框', /AI Coding Agent/.test(screen.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')));
+  const plain = screen.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
+  check('对话终端打开后绘制了标题行与欢迎页', /✦ AI Agent/.test(plain) && /\/settings/.test(plain) && /(有什么想一起完成的|先连接模型服务)/.test(plain));
+  const headerLinks = linkProviders[0].provideTerminalLinks({ terminal: term, line: '✦ AI Agent     /new 新建 · /history 历史 · /settings 设置' });
+  check('标题行的新建 / 历史 / 设置可以点击', headerLinks.map((l) => l.action && l.action.type).join() === 'newSession,openHistory,openSettings');
   check(
     '链接只作用于对话终端',
     linkProviders[0].provideTerminalLinks({ terminal: term, line: '见 src/a.ts:12' }).length === 1 &&

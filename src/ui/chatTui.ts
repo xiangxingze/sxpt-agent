@@ -1,10 +1,15 @@
 /**
  * 终端里的对话界面（纯逻辑，不依赖 vscode，可在 Node 中直接测试）。
  *
+ * 版式参照 prototype/agent-workbench.html（V4 原型），但用终端字符绘制，不依赖 webview：
+ *  - 空会话：顶部标题行、居中的欢迎语与建议、底部输入框（整屏铺满，输入框贴底）；
+ *  - 对话中：标题行 + 会话标题，用户消息为右对齐的气泡，回答以「✦ AI Agent」开头；
+ *  - 审批：输入框位置换成「等待你确认」卡片，按钮横向排列（查看修改 / 允许修改 / 暂不修改）；
+ *  - 输入框：上方是当前文件，框内是输入区与模型状态，框下是随审批模式变化的提示。
+ *
  * 屏幕分成两部分：
- *  - 已定稿的内容：用户消息、助手文本、工具调用、计划、汇总，写出后不再改动，随终端滚动；
- *  - 底部的动态区域：正在流式输出的半行文本、进行中的工具、输入框 / 审批卡片、状态栏，
- *    每次变化时整体擦除重画（光标上移 → 清到屏幕末尾 → 重新输出）。
+ *  - 已定稿的内容：写出后不再改动，随终端滚动；
+ *  - 底部的动态区域：流式半行、进行中的工具、欢迎页、输入框 / 审批卡片，每次变化时整体擦除重画。
  *
  * 与宿主（ChatController）之间沿用一套消息协议：receive() 接收宿主事件，emit() 发出用户操作。
  */
@@ -16,7 +21,7 @@ import type { DiffLine } from './diffLines';
 export interface TuiOptions {
   write(data: string): void;
   emit(message: any): void;
-  /** 显示在欢迎框里的工作目录 */
+  /** 工作目录（保留给宿主使用，界面不再单独展示） */
   cwd?: string;
   /** 测试用：立即重绘、关闭动画 */
   sync?: boolean;
@@ -39,6 +44,12 @@ interface ApprovalView {
   responded: boolean;
 }
 
+interface ApprovalOption {
+  label: string;
+  /** 回应审批；没有 decision 的按钮（查看修改）不结束审批 */
+  decision?: string;
+}
+
 interface SlashCommand {
   name: string;
   hint: string;
@@ -49,10 +60,10 @@ interface SlashCommand {
 
 const SLASH_COMMANDS: SlashCommand[] = [
   { name: '/new', hint: '新建对话', message: { type: 'newSession' } },
-  { name: '/history', hint: '选择历史会话', message: { type: 'openHistory' }, whileBusy: true },
-  { name: '/model', hint: '切换模型', message: { type: 'pickModel' } },
-  { name: '/mode', hint: '切换审批模式', message: { type: 'pickMode' } },
+  { name: '/history', hint: '历史会话', message: { type: 'openHistory' }, whileBusy: true },
   { name: '/settings', hint: '模型服务与 Agent 设置', message: { type: 'openSettings' } },
+  { name: '/model', hint: '切换模型', message: { type: 'pickModel' } },
+  { name: '/mode', hint: '切换操作确认方式', message: { type: 'pickMode' } },
   { name: '/undo', hint: '撤销上一次任务的文件修改', message: { type: 'undo' } },
   { name: '/context', hint: '查看将随消息发送的上下文', message: { type: 'showContext' }, whileBusy: true },
   { name: '/explain', hint: '解释选中的代码', message: { type: 'quickAction', action: 'explain' } },
@@ -66,15 +77,54 @@ const SLASH_COMMANDS: SlashCommand[] = [
   { name: '/help', hint: '查看命令与快捷键', whileBusy: true }
 ];
 
-const MODE_LABELS: Record<string, string> = {
-  ask: '逐项确认',
-  autoEdit: '自动应用修改',
-  readOnly: '只读'
-};
+/** 标题行右侧的操作：在终端里 Ctrl / Cmd + 单击即可执行（见 findActionLinks） */
+const HEADER_ACTIONS: Array<{ name: string; label: string; message: any }> = [
+  { name: '/new', label: '新建', message: { type: 'newSession' } },
+  { name: '/history', label: '历史', message: { type: 'openHistory' } },
+  { name: '/settings', label: '设置', message: { type: 'openSettings' } }
+];
 
+/** 欢迎页的建议：Tab 填入输入框，或 Ctrl / Cmd + 单击 */
+export const WELCOME_SUGGESTIONS: Array<{ label: string; prompt: string }> = [
+  { label: '了解这个项目', prompt: '帮我理解这个项目的结构' },
+  { label: '分析当前报错', prompt: '帮我分析当前的报错，先说明原因' }
+];
+
+const APP_NAME = 'AI Agent';
+const SPARK = '✦';
 const SPINNER = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'];
-const PLACEHOLDER = '描述你的任务，或输入 / 查看命令';
+const PLACEHOLDER = '提问、修改代码，或描述你的想法…';
 const MAX_SUGGESTIONS = 8;
+const TITLE_MAX = 36;
+
+/** 终端里可点击的操作（标题行的 /new /history /settings、欢迎页的建议） */
+export interface ActionLink {
+  startIndex: number;
+  length: number;
+  tooltip: string;
+  action: any;
+}
+
+/** 从终端的一行文本里找出可点击的操作（纯函数，便于自检） */
+export function findActionLinks(line: string): ActionLink[] {
+  const links: ActionLink[] = [];
+  if (line.includes(`${SPARK} ${APP_NAME}`) && line.includes('/settings')) {
+    for (const a of HEADER_ACTIONS) {
+      const at = line.indexOf(a.name, line.indexOf(APP_NAME) + APP_NAME.length);
+      if (at >= 0) {
+        links.push({ startIndex: at, length: a.name.length, tooltip: a.label, action: a.message });
+      }
+    }
+  }
+  for (const s of WELCOME_SUGGESTIONS) {
+    const text = `${s.label} ↗`;
+    const at = line.indexOf(text);
+    if (at >= 0) {
+      links.push({ startIndex: at, length: text.length, tooltip: '填入输入框', action: { type: 'fillPrompt', text: s.prompt } });
+    }
+  }
+  return links;
+}
 
 export class ChatTui {
   private cols = 80;
@@ -88,6 +138,12 @@ export class ChatTui {
   private queue: string[] = [];
   /** 最后一行定稿内容是否为空行（用于控制块之间的间距） */
   private atBlank = true;
+  /** 刚写出「✦ AI Agent」标签：紧随其后的内容不再空一行 */
+  private afterLabel = false;
+  /** 清屏后已定稿的行数（不超过屏幕高度），用于让输入框贴在屏幕底部 */
+  private screenUsed = 0;
+  /** 当前会话已经有对话内容（已写出标题行）；没有时显示欢迎页 */
+  private hasConversation = false;
 
   /** 屏幕上当前的动态区域：各行宽度与光标所在行 */
   private dynWidths: number[] = [];
@@ -101,7 +157,7 @@ export class ChatTui {
   private approvals: ApprovalView[] = [];
   private pendingStat = '';
   private pendingDiff: DiffLine[] | undefined;
-  private deniedPending = false;
+  private deniedKind: string | undefined;
 
   private configured = false;
   private model = '';
@@ -132,10 +188,10 @@ export class ChatTui {
     }
     this.opened = true;
     this.dynWidths = [];
+    this.screenUsed = 0;
     this.opts.write('\x1b[?2004h');
     const backlog = this.backlog ?? [];
     this.backlog = undefined;
-    this.banner();
     // 宿主在 ready 时补发历史与运行快照；快照已覆盖的对话事件不再重复播放。
     // 独立通知和错误仍保留，例如手动运行命令的结果。
     this.opts.emit({ type: 'ready' });
@@ -161,6 +217,18 @@ export class ChatTui {
 
   get draft(): string {
     return this.editor.text;
+  }
+
+  /** 把一段文字放进输入框（欢迎页的建议被点击时） */
+  fillPrompt(text: string): void {
+    if (this.approvals.length > 0) {
+      return;
+    }
+    this.editor.clear();
+    this.editor.set(sanitize(text));
+    this.hint = '';
+    this.slashIndex = 0;
+    this.schedule();
   }
 
   setDimensions(cols: number, rows: number): void {
@@ -225,6 +293,11 @@ export class ChatTui {
   // 尺寸
   // ------------------------------------------------------------------
 
+  /** 整个对话区的宽度（标题行、气泡右对齐的基准） */
+  private contentWidth(): number {
+    return Math.max(20, Math.min(this.cols - 1, 120));
+  }
+
   /** 输入框、审批卡片的外框宽度 */
   private boxWidth(): number {
     return Math.max(24, Math.min(this.cols - 2, 110));
@@ -233,6 +306,11 @@ export class ChatTui {
   /** 正文宽度（不含行首 2 列缩进） */
   private textWidthLimit(): number {
     return Math.max(20, Math.min(this.cols - 4, 116));
+  }
+
+  private center(text: string, width: number): string {
+    const gap = Math.floor((width - textWidth(text)) / 2);
+    return gap > 0 ? ' '.repeat(gap) + text : text;
   }
 
   // ------------------------------------------------------------------
@@ -246,15 +324,16 @@ export class ChatTui {
     }
   }
 
-  /** 输出一个独立的块：与上文之间保证有一个空行 */
+  /** 输出一个独立的块：与上文之间保证有一个空行（紧跟「✦ AI Agent」标签时除外） */
   private block(rows: string[]): void {
     if (rows.length === 0) {
       return;
     }
-    if (!this.atBlank) {
+    if (!this.atBlank && !this.afterLabel) {
       this.commit(['']);
     }
     this.commit(rows);
+    this.afterLabel = false;
   }
 
   private bulleted(text: string, bullet: string, width = this.textWidthLimit()): string[] {
@@ -265,35 +344,72 @@ export class ChatTui {
     return rows.map((r, i) => (i === 0 ? `${bullet} ${r}` : `  ${r}`));
   }
 
-  private banner(): void {
-    const w = Math.max(24, Math.min(this.cols - 2, 72));
-    const inner = w - 4;
-    const line = (content: string) => `${style.dim('│')} ${padEnd(content, inner)} ${style.dim('│')}`;
-    const rows = [style.dim(`╭${'─'.repeat(w - 2)}╮`), line(`${style.accent('✻')} ${style.bold('AI Coding Agent')}`), line('')];
-    const intro = '描述一个目标，我会阅读代码、制定计划、修改文件并验证结果。每次修改都会先让你确认。';
-    for (const r of wrapAnsi(intro, inner - 2)) {
-      rows.push(line(`  ${style.dim(r)}`));
+  /** 标题行：左边是名称，右边是可点击的 /new /history /settings */
+  private headerRow(): string {
+    const w = this.contentWidth();
+    const left = `${style.accent(SPARK)} ${style.bold(APP_NAME)}`;
+    const variants = [
+      HEADER_ACTIONS.map((a) => `${a.name} ${a.label}`).join(' · '),
+      HEADER_ACTIONS.map((a) => a.name).join(' · ')
+    ];
+    for (const right of variants) {
+      const gap = w - textWidth(left) - textWidth(right);
+      if (gap >= 2) {
+        return `${left}${' '.repeat(gap)}${style.dim(right)}`;
+      }
     }
-    if (this.opts.cwd) {
-      rows.push(line(''));
-      rows.push(line(`  ${style.dim('工作目录')}  ${truncate(this.opts.cwd, Math.max(8, inner - 12))}`));
+    return left;
+  }
+
+  /** 会话有了第一条内容时写出标题行与会话标题（对应原型顶部的标题与 thread-title） */
+  private ensureHeader(title: string): void {
+    if (this.hasConversation) {
+      return;
     }
-    rows.push(style.dim(`╰${'─'.repeat(w - 2)}╯`));
+    this.hasConversation = true;
+    const rows = [this.headerRow()];
+    const clean = sanitize(title).replace(/\s+/g, ' ').trim();
+    if (clean) {
+      rows.push(style.dim(truncate(truncate(clean, TITLE_MAX * 2), this.contentWidth())));
+    }
     this.block(rows);
   }
 
+  /** 用户消息：右对齐的圆角气泡 */
   private userBlock(text: string): void {
-    this.block(this.bulleted(text, style.dim('>')));
+    const w = this.contentWidth();
+    const maxInner = Math.max(8, Math.floor(w * 0.85) - 4);
+    const lines: string[] = [];
+    for (const line of sanitize(text).split('\n')) {
+      lines.push(...(line ? wrapAnsi(line, maxInner) : ['']));
+    }
+    while (lines.length > 1 && lines[lines.length - 1] === '') {
+      lines.pop();
+    }
+    const inner = Math.max(1, ...lines.map((l) => textWidth(l)));
+    const indent = ' '.repeat(Math.max(0, w - inner - 4));
+    const rows = [`${indent}${style.dim(`╭${'─'.repeat(inner + 2)}╮`)}`];
+    for (const l of lines) {
+      rows.push(`${indent}${style.dim('│')} ${padEnd(l, inner)} ${style.dim('│')}`);
+    }
+    rows.push(`${indent}${style.dim(`╰${'─'.repeat(inner + 2)}╯`)}`);
+    this.block(rows);
   }
 
-  /** 把助手文本的定稿行写出：一段文本的第一行带 ● */
+  /** 每一轮回答前的「✦ AI Agent」标签 */
+  private assistantLabel(): void {
+    this.block([`${style.accent(SPARK)} ${style.bold(APP_NAME)}`]);
+    this.afterLabel = true;
+  }
+
+  /** 把助手文本的定稿行写出：一段文本与上文之间空一行，正文缩进两列 */
   private commitSeg(rows: string[]): void {
     for (const row of rows) {
       if (!this.segStarted) {
         if (row === '') {
           continue;
         }
-        this.block([`● ${row}`]);
+        this.block([`  ${row}`]);
         this.segStarted = true;
       } else {
         this.commit([row === '' ? '' : `  ${row}`]);
@@ -343,10 +459,14 @@ export class ChatTui {
     const width = this.textWidthLimit() - 4;
 
     if (!ok) {
-      const reason = this.deniedPending ? '已拒绝' : sanitize(String(msg.summary || '失败'));
-      detail.push(...wrapAnsi(style.red(reason), width));
+      const reason = this.deniedKind
+        ? this.deniedKind === 'bash'
+          ? '你选择了暂不运行'
+          : '你选择了暂不修改，文件没有改动'
+        : sanitize(String(msg.summary || '失败'));
+      detail.push(...wrapAnsi(this.deniedKind ? style.yellow(reason) : style.red(reason), width));
     } else if (name === 'edit' || name === 'write') {
-      detail.push(`已写入${this.pendingStat ? `（${this.pendingStat}）` : ''}`);
+      detail.push(`${style.green('✓')} 已修改${this.pendingStat ? `（${this.pendingStat}）` : ''}`);
       if (this.pendingDiff && this.pendingDiff.length > 0) {
         detail.push(...this.diffRows(this.pendingDiff, width, 12));
       }
@@ -369,7 +489,7 @@ export class ChatTui {
     detail.forEach((d, i) => rows.push(`${i === 0 ? `  ${style.dim('⎿')} ` : '    '}${d}`));
     this.pendingStat = '';
     this.pendingDiff = undefined;
-    this.deniedPending = false;
+    this.deniedKind = undefined;
     this.block(rows);
   }
 
@@ -402,15 +522,18 @@ export class ChatTui {
     const keys: Array<[string, string]> = [
       ['Enter', '发送'],
       ['Shift+Enter', '换行（也可用 Alt+Enter、Ctrl+J，或行尾输入 \\ 再回车）'],
+      ['Tab', '补全命令；空输入框时填入欢迎页的建议'],
       ['↑ / ↓', '翻看输入历史'],
-      ['Esc', '停止正在运行的任务 / 拒绝审批'],
+      ['Esc', '停止正在运行的任务'],
       ['Ctrl+C', '清空输入；任务运行中为停止'],
       ['Ctrl+U', '删除到行首'],
-      ['d（审批时）', '重新打开 Diff']
+      ['等待确认时', '←→ 选择按钮，Enter 确认；y 允许，n 暂不，d 查看修改']
     ];
     for (const [k, v] of keys) {
       rows.push(`  ${padEnd(k, 16)} ${style.dim(v)}`);
     }
+    rows.push('');
+    rows.push(style.dim('  标题行的 /new /history /settings 可以 Ctrl（Mac 上为 Cmd）+ 单击'));
     this.block(rows);
   }
 
@@ -472,11 +595,14 @@ export class ChatTui {
         break;
       case 'user':
         this.endSeg();
+        this.ensureHeader(String(msg.text ?? ''));
         this.userBlock(String(msg.text ?? ''));
         break;
       case 'assistantStart':
         this.endSeg();
+        this.ensureHeader('');
         this.status = '';
+        this.assistantLabel();
         break;
       case 'textDelta':
         if (!this.md) {
@@ -514,7 +640,7 @@ export class ChatTui {
         if (this.approvals.some((a) => a.id === String(r.id))) {
           return;
         }
-        this.approvals.push({
+        const view: ApprovalView = {
           id: String(r.id),
           kind: r.kind,
           title: String(r.title ?? ''),
@@ -527,14 +653,17 @@ export class ChatTui {
           shownAt: Date.now(),
           selected: 0,
           responded: false
-        });
+        };
+        // 默认选中「允许」
+        view.selected = Math.max(0, this.approvalOptions(view).findIndex((o) => o.decision === 'allow'));
+        this.approvals.push(view);
         break;
       }
       case 'approvalDone': {
         const done = this.approvals.find((a) => a.id === String(msg.id));
         this.approvals = this.approvals.filter((a) => a !== done);
         if (msg.decision === 'deny') {
-          this.deniedPending = true;
+          this.deniedKind = done?.kind ?? 'edit';
           this.pendingStat = '';
           this.pendingDiff = undefined;
         } else if (done && done.kind !== 'bash') {
@@ -568,7 +697,7 @@ export class ChatTui {
         this.runningTools.clear();
         this.pendingStat = '';
         this.pendingDiff = undefined;
-        this.deniedPending = false;
+        this.deniedKind = undefined;
         if (msg.meta) {
           this.block([style.dim(`  ${sanitize(String(msg.meta))}`)]);
         }
@@ -596,16 +725,18 @@ export class ChatTui {
         this.approvals = [];
         this.pendingStat = '';
         this.pendingDiff = undefined;
-        this.deniedPending = false;
+        this.deniedKind = undefined;
         this.queue = [];
         this.atBlank = true;
+        this.afterLabel = false;
+        this.hasConversation = false;
         this.status = '';
         this.hint = '';
         if (this.opened) {
           this.opts.write('\x1b[2J\x1b[3J\x1b[H');
           this.dynWidths = [];
+          this.screenUsed = 0;
         }
-        this.banner();
         break;
       default:
         return;
@@ -614,22 +745,27 @@ export class ChatTui {
   }
 
   private showHistory(messages: Array<{ role: string; content: string }>): void {
-    const recent = messages.filter((m) => m && (m.role === 'user' || m.role === 'assistant')).slice(-8);
-    if (recent.length === 0) {
+    const all = messages.filter((m) => m && (m.role === 'user' || m.role === 'assistant'));
+    if (all.length === 0) {
       return;
     }
-    this.block([style.dim(`── 之前的对话（最近 ${recent.length} 条）──`)]);
+    this.ensureHeader(all.find((m) => m.role === 'user')?.content ?? '');
+    const recent = all.slice(-8);
+    if (all.length > recent.length) {
+      this.block([style.dim(`── 更早的 ${all.length - recent.length} 条消息未显示 ──`)]);
+    }
     for (const m of recent) {
       if (m.role === 'user') {
         this.userBlock(m.content);
       } else {
+        this.assistantLabel();
         const rows = renderMarkdown(m.content, this.textWidthLimit());
         this.segStarted = false;
         this.commitSeg(rows);
         this.segStarted = false;
       }
     }
-    this.block([style.dim('── 以上为历史，可以继续提问 ──')]);
+    this.block([style.dim('── 以上是之前的对话，可以继续提问 ──')]);
   }
 
   private statOf(a: ApprovalView): string {
@@ -648,16 +784,80 @@ export class ChatTui {
     return SLASH_COMMANDS.filter((c) => c.name.startsWith(text.toLowerCase())).slice(0, MAX_SUGGESTIONS);
   }
 
+  /** 欢迎页（空会话时显示在输入框上方）；compact 时只保留标题 */
+  private welcomeRows(level: 'full' | 'compact'): string[] {
+    const w = this.contentWidth();
+    const rows: string[] = [];
+    const title = this.configured ? '有什么想一起完成的？' : '先连接模型服务';
+    const sub = this.configured ? '从一个问题，或一个想法开始。' : '填写 API 地址、API Key 并选择模型后就可以开始。';
+    if (level === 'compact') {
+      return [this.center(style.bold(title), w)];
+    }
+    rows.push(this.center(style.accent(SPARK), w), '');
+    rows.push(this.center(style.bold(title), w));
+    rows.push(this.center(style.dim(truncate(sub, w)), w), '');
+    if (!this.configured) {
+      rows.push(this.center(style.accent('按 Enter 开始配置'), w));
+      return rows;
+    }
+    for (const s of WELCOME_SUGGESTIONS) {
+      const active = this.editor.text === s.prompt;
+      const pill = `${style.dim('(')} ${active ? style.accent(`${s.label} ↗`) : `${s.label} ↗`} ${style.dim(')')}`;
+      rows.push(this.center(pill, w));
+    }
+    rows.push(this.center(style.dim('Tab 填入建议'), w));
+    return rows;
+  }
+
+  private approvalOptions(a: ApprovalView): ApprovalOption[] {
+    if (a.kind === 'bash') {
+      return [
+        { label: '允许运行', decision: 'allow' },
+        { label: '暂不运行', decision: 'deny' }
+      ];
+    }
+    return [
+      { label: '查看修改' },
+      { label: '允许修改', decision: 'allow' },
+      { label: '本次会话都允许', decision: 'allowAllEdits' },
+      { label: '暂不修改', decision: 'deny' }
+    ];
+  }
+
+  /** 横排的按钮，放不下时折到下一行；选中的按钮反色显示 */
+  private buttonRows(a: ApprovalView, width: number): string[] {
+    const rows: string[] = [];
+    let row = '';
+    let used = 0;
+    this.approvalOptions(a).forEach((opt, i) => {
+      const text = ` ${opt.label} `;
+      const cell = i === a.selected ? style.inverse(style.bold(text)) : text;
+      const w = textWidth(text);
+      if (used > 0 && used + 2 + w > width) {
+        rows.push(row);
+        row = '';
+        used = 0;
+      }
+      row += (used > 0 ? '  ' : '') + cell;
+      used += (used > 0 ? 2 : 0) + w;
+    });
+    if (row) {
+      rows.push(row);
+    }
+    return rows;
+  }
+
   private approvalRows(a: ApprovalView): string[] {
     const w = this.boxWidth();
     const inner = w - 4;
     const edge = (s: string) => style.yellow(s);
-    const stat = a.kind === 'bash' ? '' : this.statOf(a);
-    let title = truncate(sanitize(a.title), Math.max(6, w - 8 - textWidth(stat)));
-    title = stat ? `${title} · ${stat}` : title;
-    const fill = Math.max(0, w - 5 - textWidth(title));
-    const rows = [edge(`╭─ `) + style.bold(title) + edge(` ${'─'.repeat(fill)}╮`)];
+    const heading = '等待你确认';
+    const rows = [edge('╭─ ') + style.bold(heading) + edge(` ${'─'.repeat(Math.max(0, w - 5 - textWidth(heading)))}╮`)];
     const line = (content: string) => `${edge('│')} ${padEnd(content, inner)} ${edge('│')}`;
+
+    const stat = a.kind === 'bash' ? '' : this.statOf(a);
+    const title = truncate(sanitize(a.title), Math.max(6, inner - (stat ? textWidth(stat) + 3 : 0)));
+    rows.push(line(`${style.bold(title)}${stat ? style.dim(` · ${stat}`) : ''}`));
 
     if (a.kind === 'bash') {
       for (const r of wrapAnsi(sanitize(a.command ?? ''), inner).slice(0, 8)) {
@@ -666,38 +866,44 @@ export class ChatTui {
       if (a.cwd) {
         rows.push(line(style.dim(truncate(`工作目录：${a.cwd}`, inner))));
       }
-    } else if (a.diff && a.diff.length > 0) {
-      const limit = Math.max(3, Math.min(16, this.rows - 14));
-      for (const r of this.diffRows(a.diff, inner, limit)) {
-        rows.push(line(r));
-      }
     } else {
-      rows.push(line(style.dim('修改内容已在 Diff 编辑器中打开')));
+      if (a.diff && a.diff.length > 0) {
+        const limit = Math.max(3, Math.min(16, this.rows - 16));
+        for (const r of this.diffRows(a.diff, inner, limit)) {
+          rows.push(line(r));
+        }
+      }
+      rows.push(line(style.dim(truncate('完整修改已在编辑器中打开，允许后才会写入文件', inner))));
+    }
+    rows.push(line(''));
+    for (const r of this.buttonRows(a, inner)) {
+      rows.push(line(r));
     }
     rows.push(edge(`╰${'─'.repeat(w - 2)}╯`));
-
-    const question = a.kind === 'bash' ? '要运行这条命令吗？' : '要应用这次修改吗？';
-    rows.push(` ${style.bold(question)}${a.kind === 'bash' ? '' : style.dim('  完整 Diff 已在编辑器中打开，确认后才会写入')}`);
-    this.approvalOptions(a).forEach((opt, i) => {
-      const selected = i === a.selected;
-      rows.push(` ${selected ? style.accent('❯') : ' '} ${selected ? style.bold(`${i + 1}. ${opt.label}`) : `${i + 1}. ${opt.label}`}`);
-    });
-    rows.push(style.dim(` ↑↓ 选择 · Enter 确认 · Esc 拒绝${a.kind === 'bash' ? '' : ' · d 重新打开 Diff'}`));
+    rows.push(style.dim(` ←→ 选择 · Enter 确认 · y 允许 · n 暂不${a.kind === 'bash' ? '' : ' · d 查看修改'}`));
     return rows;
   }
 
-  private approvalOptions(a: ApprovalView): Array<{ label: string; decision: string }> {
-    if (a.kind === 'bash') {
-      return [
-        { label: '允许', decision: 'allow' },
-        { label: '拒绝', decision: 'deny' }
-      ];
+  /** 输入框下方的提示：随审批模式变化（对应原型的 footnote） */
+  private footnote(): string {
+    if (this.hint) {
+      return style.yellow(this.hint);
     }
-    return [
-      { label: '允许', decision: 'allow' },
-      { label: '允许，并且本次会话不再询问文件修改', decision: 'allowAllEdits' },
-      { label: '拒绝', decision: 'deny' }
-    ];
+    if (!this.configured) {
+      return style.yellow('尚未配置模型服务：按 Enter 开始配置');
+    }
+    if (this.busy) {
+      return style.dim('Esc 停止生成 · 运行中仍可使用 /history /context');
+    }
+    const note =
+      this.mode === 'readOnly'
+        ? '当前为只读模式'
+        : this.mode === 'autoEdit'
+          ? '运行命令前会请你确认'
+          : this.autoEdits
+            ? '本次会话自动允许修改，命令仍需确认'
+            : '修改前会请你确认';
+    return style.dim(`Enter 发送 · Shift+Enter 换行 · / 命令 · ${note}`);
   }
 
   private footer(): { rows: string[]; cursorRow: number; cursorCol: number; showCursor: boolean } {
@@ -708,6 +914,8 @@ export class ChatTui {
     }
 
     const rows: string[] = [];
+    const w = this.boxWidth();
+    const inner = w - 4;
     if (this.busy) {
       const seconds = Math.max(0, Math.round((Date.now() - this.runStartedAt) / 1000));
       const status = this.status || (this.runningTools.size > 0 ? '正在执行…' : '正在思考…');
@@ -715,16 +923,27 @@ export class ChatTui {
         `${style.accent(SPINNER[this.frame % SPINNER.length])} ${truncate(status, Math.max(10, this.cols - 26))} ${style.dim(`(${seconds}s · Esc 停止)`)}`
       );
     }
+    if (this.contextLabel) {
+      rows.push(` ${style.dim(truncate(`▧ ${sanitize(this.contextLabel)}`, inner))}`);
+    }
 
-    const w = this.boxWidth();
-    const inner = w - 6;
+    // 输入框：输入区（至少两行）+ 模型状态行
     const layout = this.editor.layout(inner - 1);
     rows.push(style.dim(`╭${'─'.repeat(w - 2)}╮`));
     const boxTop = rows.length;
-    layout.rows.forEach((text, i) => {
-      const content = this.editor.isEmpty ? style.dim(truncate(PLACEHOLDER, inner)) : text;
-      rows.push(`${style.dim('│')} ${i === 0 ? '> ' : '  '}${padEnd(content, inner)} ${style.dim('│')}`);
-    });
+    const inputRows = this.editor.isEmpty ? [style.dim(truncate(PLACEHOLDER, inner))] : [...layout.rows];
+    while (inputRows.length < 2) {
+      inputRows.push('');
+    }
+    for (const text of inputRows) {
+      rows.push(`${style.dim('│')} ${padEnd(text, inner)} ${style.dim('│')}`);
+    }
+    const dot = this.configured ? style.green('●') : style.yellow('●');
+    const modelName = this.configured ? this.model || '未选择模型' : '请先配置模型';
+    const send = this.busy ? '■' : '↑';
+    const left = `${dot} ${truncate(sanitize(modelName), Math.max(4, inner - 4))}`;
+    const gap = Math.max(1, inner - textWidth(left) - textWidth(send));
+    rows.push(`${style.dim('│')} ${left}${' '.repeat(gap)}${style.bold(send)} ${style.dim('│')}`);
     rows.push(style.dim(`╰${'─'.repeat(w - 2)}╯`));
 
     const suggestions = this.suggestions();
@@ -734,50 +953,19 @@ export class ChatTui {
       suggestions.forEach((c, i) => {
         const selected = i === this.slashIndex;
         const name = padEnd(c.name, 11);
-        rows.push(
-          selected
-            ? `  ${style.accent(`❯ ${name}`)} ${c.hint}`
-            : `    ${name} ${style.dim(c.hint)}`
-        );
+        rows.push(selected ? `  ${style.accent(`❯ ${name}`)} ${c.hint}` : `    ${name} ${style.dim(c.hint)}`);
       });
     } else {
-      rows.push(this.statusRow(w));
+      const note = this.footnote();
+      rows.push(this.center(textWidth(note) > w ? truncate(stripAnsi(note), w) : note, w));
     }
 
     return {
       rows,
       cursorRow: boxTop + layout.cursorRow,
-      cursorCol: 4 + layout.cursorCol,
+      cursorCol: 2 + layout.cursorCol,
       showCursor: true
     };
-  }
-
-  private statusRow(w: number): string {
-    let left = this.hint;
-    if (!left) {
-      left = !this.configured
-        ? '尚未配置模型服务：直接回车，或输入 /settings 开始配置'
-        : this.busy
-          ? 'Esc 停止'
-          : '/ 命令 · Shift+Enter 换行';
-    }
-    const modeLabel = MODE_LABELS[this.mode] ?? this.mode;
-    const parts = [this.contextLabel, this.model || '未配置模型', this.autoEdits ? `${modeLabel}（本次会话自动允许修改）` : modeLabel];
-    let right = parts.filter(Boolean).join(' · ');
-    const room = w - 4;
-    if (textWidth(left) + textWidth(right) + 2 > room) {
-      right = parts.slice(1).filter(Boolean).join(' · ');
-    }
-    if (textWidth(left) + textWidth(right) + 2 > room) {
-      right = truncate(right, Math.max(0, room - textWidth(left) - 2));
-      if (textWidth(right) < 6) {
-        right = '';
-        left = truncate(left, room);
-      }
-    }
-    const gap = Math.max(2, room - textWidth(left) - textWidth(right));
-    const leftStyled = this.hint || !this.configured ? style.yellow(left) : style.dim(left);
-    return `  ${leftStyled}${' '.repeat(gap)}${style.dim(right)}`;
   }
 
   private render(): void {
@@ -817,20 +1005,51 @@ export class ChatTui {
 
     const dyn: string[] = [];
     if (live.length > 0) {
-      if (!this.segStarted && !this.atBlank) {
+      if (!this.segStarted && !this.atBlank && !this.afterLabel) {
         dyn.push('');
       }
-      live.forEach((r, i) => dyn.push(!this.segStarted && i === 0 ? `● ${r}` : r === '' ? '' : `  ${r}`));
+      live.forEach((r) => dyn.push(r === '' ? '' : `  ${r}`));
     }
     if (toolRows.length > 0) {
-      if (dyn.length > 0 || !this.atBlank) {
+      if (dyn.length > 0 || (!this.atBlank && !this.afterLabel)) {
         dyn.push('');
       }
       dyn.push(...toolRows);
     }
-    if (dyn.length > 0 || !this.atBlank) {
-      dyn.push('');
+
+    // 本次写出的定稿行之后，屏幕上还剩多少行
+    this.screenUsed = Math.min(this.rows, this.screenUsed + this.queue.length);
+    const free = this.rows - this.screenUsed;
+
+    const welcome = !this.hasConversation && this.approvals.length === 0 && dyn.length === 0 && !this.busy;
+    if (welcome) {
+      // 空会话：标题行在上，欢迎语居中，输入框贴底
+      const sep = this.atBlank ? 0 : 1;
+      const avail = free - sep - footer.rows.length;
+      if (avail >= 1) {
+        if (sep) {
+          dyn.push('');
+        }
+        dyn.push(this.headerRow());
+        let body = this.welcomeRows('full');
+        if (body.length + 2 > avail - 1) {
+          body = avail - 1 >= 3 ? this.welcomeRows('compact') : [];
+        }
+        const extra = Math.max(0, avail - 1 - body.length);
+        const top = Math.floor(extra / 2);
+        for (let i = 0; i < top; i++) dyn.push('');
+        dyn.push(...body);
+        for (let i = 0; i < extra - top; i++) dyn.push('');
+      }
+    } else {
+      if (dyn.length > 0 || !this.atBlank) {
+        dyn.push('');
+      }
+      // 内容还没铺满一屏时，用空行把输入框推到屏幕底部
+      const pad = free - dyn.length - footer.rows.length;
+      for (let i = 0; i < pad; i++) dyn.push('');
     }
+
     const footerStart = dyn.length;
     dyn.push(...footer.rows);
     // 动态区域的每一行都不能超过终端宽度，否则自动折行会打乱下一次重绘
@@ -947,17 +1166,25 @@ export class ChatTui {
     this.opts.emit({ type: 'approvalResponse', id: a.id, decision });
   }
 
+  private activate(a: ApprovalView, opt: ApprovalOption): void {
+    if (opt.decision) {
+      this.respond(a, opt.decision);
+    } else if (a.kind !== 'bash') {
+      this.opts.emit({ type: 'openDiff', id: a.id });
+    }
+  }
+
   private approvalKey(a: ApprovalView, key: string): void {
     if (a.responded || Date.now() - a.shownAt < (this.opts.approvalGuardMs ?? 400)) {
       return;
     }
     const options = this.approvalOptions(a);
-    if (key === '\x1b[A') {
+    if (key === '\x1b[D' || key === '\x1bOD' || key === '\x1b[A' || key === '\x1bOA' || key === '\x1b[Z') {
       a.selected = (a.selected + options.length - 1) % options.length;
-    } else if (key === '\x1b[B' || key === '\t') {
+    } else if (key === '\x1b[C' || key === '\x1bOC' || key === '\x1b[B' || key === '\x1bOB' || key === '\t') {
       a.selected = (a.selected + 1) % options.length;
     } else if (key === '\r') {
-      this.respond(a, options[a.selected].decision);
+      this.activate(a, options[a.selected]);
     } else if (key === '\x1b' || key === 'n' || key === 'N') {
       this.respond(a, 'deny');
     } else if (key === 'y' || key === 'Y') {
@@ -969,9 +1196,25 @@ export class ChatTui {
     } else if (/^[1-9]$/.test(key)) {
       const opt = options[Number(key) - 1];
       if (opt) {
-        this.respond(a, opt.decision);
+        a.selected = Number(key) - 1;
+        this.activate(a, opt);
       }
     }
+  }
+
+  /** 空会话里按 Tab：依次把欢迎页的建议填进输入框 */
+  private cycleWelcomeSuggestion(): boolean {
+    if (this.hasConversation || !this.configured) {
+      return false;
+    }
+    const text = this.editor.text;
+    const at = WELCOME_SUGGESTIONS.findIndex((s) => s.prompt === text);
+    if (text && at < 0) {
+      return false;
+    }
+    this.editor.clear();
+    this.editor.set(WELCOME_SUGGESTIONS[(at + 1) % WELCOME_SUGGESTIONS.length].prompt);
+    return true;
   }
 
   private onKey(key: string): void {
@@ -1069,6 +1312,8 @@ export class ChatTui {
         if (suggestions.length > 0) {
           this.editor.set(suggestions[this.slashIndex].name);
           this.slashIndex = 0;
+        } else {
+          this.cycleWelcomeSuggestion();
         }
         break;
       case '\x1b':
@@ -1083,6 +1328,7 @@ export class ChatTui {
         // Ctrl+L：整屏重画
         this.opts.write('\x1b[2J\x1b[H');
         this.dynWidths = [];
+        this.screenUsed = 0;
         break;
       default:
         if (/^\x1b\[1;[0-9][CD]$/.test(key)) {
@@ -1134,6 +1380,12 @@ export class ChatTui {
       } else {
         this.opts.emit(command.message);
       }
+      return;
+    }
+    if (!this.configured) {
+      // 保留已输入的内容，配置完成后可以直接发送
+      this.hint = '先配置模型服务，配置完成后按 Enter 发送';
+      this.opts.emit({ type: 'openSettings' });
       return;
     }
     if (this.busy) {
