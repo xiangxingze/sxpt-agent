@@ -2,6 +2,8 @@ name: Publish extension to Open VSX
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
   workflow_dispatch:
