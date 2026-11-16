@@ -4,11 +4,21 @@ import { SecretStore } from './secrets';
 import { collectContext, contextToPrompt } from './contextCollector';
 import { ChangeTracker } from './changeTracker';
 import { DiffPreview } from './diffPreview';
-import { ChatViewProvider } from './chatView';
+import { ChatController } from './chatController';
+import { ChatTerminal } from './ui/chatTerminal';
+import { ApprovalNode, ReplyNode, SessionTree } from './ui/sessionTree';
 import { PlatformClient, courseContextToPrompt } from './platform/client';
 import { getProjectOutline } from './project/outline';
 import { piSdkLoadError, probePiSdk } from './agent/piAgent';
 
+/**
+ * 界面全部使用 VS Code 原生组件，不使用 webview：
+ *  - 对话：扩展自己绘制的终端标签页（ui/chatTerminal.ts）
+ *  - 侧栏：原生树视图 + 欢迎页（ui/sessionTree.ts、package.json 的 viewsWelcome）
+ *  - 设置：QuickPick / InputBox（settingsController.ts）
+ *  - 修改审核：原生 Diff 编辑器（diffPreview.ts）
+ * 原因：webview 依赖 Service Worker，在局域网 http:// 地址（非安全上下文）下无法加载。
+ */
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel('AI Coding Agent');
   const secrets = new SecretStore(context);
@@ -23,44 +33,48 @@ export function activate(context: vscode.ExtensionContext): void {
   statusBar.command = 'ptnAgent.openChat';
   context.subscriptions.push(statusBar, output);
 
-  const provider = new ChatViewProvider(
-    context.extensionUri,
-    secrets,
-    tracker,
-    diffs,
-    platform,
-    output,
-    statusBar,
-    context
-  );
+  const controller = new ChatController(secrets, tracker, diffs, platform, output, statusBar, context);
 
-  context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, provider, {
-      webviewOptions: { retainContextWhenHidden: true }
-    })
-  );
+  const terminal = new ChatTerminal({
+    onMessage: (message) => void controller.onMessage(message),
+    cwd: () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+    location: () => readConfig().chatLocation
+  });
+  controller.attachSurface(terminal);
+
+  const tree = new SessionTree();
+  tree.register(context);
+  controller.addObserver((message) => tree.receive(message));
+
+  context.subscriptions.push(terminal, { dispose: () => controller.dispose() });
 
   const register = (id: string, handler: (...args: any[]) => any) =>
     context.subscriptions.push(vscode.commands.registerCommand(id, handler));
 
-  register('ptnAgent.openChat', () => provider.reveal());
-  register('ptnAgent.explainSelection', () => provider.runQuickAction('explain'));
-  register('ptnAgent.refactorSelection', () => provider.runQuickAction('refactor'));
-  register('ptnAgent.generateTests', () => provider.runQuickAction('tests'));
-  register('ptnAgent.analyzeProblem', () => provider.runQuickAction('problem'));
-  register('ptnAgent.fixProblems', () => provider.runQuickAction('fix'));
-  register('ptnAgent.explainProject', () => provider.runQuickAction('project'));
-  register('ptnAgent.newSession', () => provider.newSession());
-  register('ptnAgent.undoLastPatch', async () => {
-    await tracker.undoLast();
-    await provider.pushState();
-  });
-  register('ptnAgent.pickMode', () => provider.pickApprovalMode());
-  register('ptnAgent.runTests', () => provider.runTests());
-  register('ptnAgent.runCommand', () => provider.promptRunCommand());
+  register('ptnAgent.openChat', () => controller.reveal());
+  register('ptnAgent.ask', () => controller.ask());
+  register('ptnAgent.stop', () => controller.stop());
+  register('ptnAgent.explainSelection', () => controller.runQuickAction('explain'));
+  register('ptnAgent.refactorSelection', () => controller.runQuickAction('refactor'));
+  register('ptnAgent.generateTests', () => controller.runQuickAction('tests'));
+  register('ptnAgent.analyzeProblem', () => controller.runQuickAction('problem'));
+  register('ptnAgent.fixProblems', () => controller.runQuickAction('fix'));
+  register('ptnAgent.explainProject', () => controller.runQuickAction('project'));
+  register('ptnAgent.newSession', () => controller.newSession());
+  register('ptnAgent.undoLastPatch', () => controller.undo());
+  register('ptnAgent.runTests', () => controller.runTests());
+  register('ptnAgent.runCommand', () => controller.promptRunCommand());
 
-  // 所有设置、模型选择与连接测试都在侧栏的同一个设置页里完成
-  register('ptnAgent.settings', () => provider.openSettings());
+  // 设置、模型选择、连接测试都用原生的 QuickPick / InputBox 完成
+  register('ptnAgent.settings', () => controller.openSettings());
+  register('ptnAgent.pickModel', () => controller.pickModel());
+  register('ptnAgent.pickMode', () => controller.pickApprovalMode());
+
+  // 侧栏树视图上的按钮
+  register('ptnAgent.approval.allow', (node?: ApprovalNode) => controller.resolveApproval(node?.id, 'allow'));
+  register('ptnAgent.approval.deny', (node?: ApprovalNode) => controller.resolveApproval(node?.id, 'deny'));
+  register('ptnAgent.approval.diff', (node?: ApprovalNode) => controller.openDiff(node?.id));
+  register('ptnAgent.openReply', (node?: ReplyNode) => controller.openReply(node?.turn?.reply ?? ''));
 
   register('ptnAgent.checkPi', async () => {
     const sdk = await probePiSdk();
@@ -71,10 +85,6 @@ export function activate(context: vscode.ExtensionContext): void {
     void vscode.window.showInformationMessage(lines.join('\n'));
   });
 
-  context.subscriptions.push({
-    dispose: () => provider.dispose()
-  });
-
   register('ptnAgent.showProjectOutline', async () => {
     const outline = await getProjectOutline(true);
     const text = outline?.summary ?? '（未检测到工作区项目）';
@@ -82,7 +92,7 @@ export function activate(context: vscode.ExtensionContext): void {
       content: `# 项目结构摘要\n\n${text}\n`,
       language: 'markdown'
     });
-    await vscode.window.showTextDocument(doc, { preview: true });
+    await vscode.window.showTextDocument(doc, { preview: true, viewColumn: terminal.docColumn() });
   });
 
   register('ptnAgent.showContext', async () => {
@@ -110,7 +120,7 @@ export function activate(context: vscode.ExtensionContext): void {
       content: `${sections.join('\n\n')}\n`,
       language: 'markdown'
     });
-    await vscode.window.showTextDocument(doc, { preview: true });
+    await vscode.window.showTextDocument(doc, { preview: true, viewColumn: terminal.docColumn() });
   });
 
   register('ptnAgent.gotoProblem', async () => {
@@ -158,17 +168,23 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
     const doc = await vscode.workspace.openTextDocument(picked.uri);
-    const editor = await vscode.window.showTextDocument(doc, { preview: true });
+    const editor = await vscode.window.showTextDocument(doc, { preview: true, viewColumn: terminal.docColumn() });
     editor.selection = new vscode.Selection(picked.range.start, picked.range.end);
     editor.revealRange(picked.range, vscode.TextEditorRevealType.InCenter);
   });
 
-  // 激活后立即展示状态栏，避免侧栏未打开时没有任何入口提示
-  void provider.pushState();
+  // 激活后立即展示状态栏，并让侧栏拿到「是否已配置」的状态
+  void controller.pushState();
 
   context.subscriptions.push(
-    vscode.window.onDidChangeTextEditorSelection(() => void provider.refreshContext()),
-    vscode.window.onDidChangeActiveTextEditor(() => void provider.refreshContext())
+    vscode.window.onDidChangeTextEditorSelection(() => void controller.refreshContext()),
+    vscode.window.onDidChangeActiveTextEditor(() => void controller.refreshContext()),
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      // 在设置编辑器里直接改了配置时，同步到对话窗口和侧栏
+      if (e.affectsConfiguration('ptnAgent')) {
+        void controller.pushState();
+      }
+    })
   );
 
   output.appendLine('[ai-agent] activated');

@@ -26,8 +26,11 @@ export class DiffPreview implements vscode.TextDocumentContentProvider {
     return vscode.Uri.parse(`${DiffPreview.scheme}:/${id}/${encodeURIComponent(fileName)}`);
   }
 
-  /** 打开 Diff，不抢焦点，使用预览标签页 */
-  async show(request: ApprovalRequest): Promise<void> {
+  /**
+   * 打开 Diff，不抢焦点，使用预览标签页。
+   * viewColumn 用来避开对话窗口所在的编辑器组，省略时使用当前活动的编辑器组。
+   */
+  async show(request: ApprovalRequest, viewColumn?: vscode.ViewColumn): Promise<void> {
     if (!request.absPath || request.proposed === undefined) {
       return;
     }
@@ -42,7 +45,9 @@ export class DiffPreview implements vscode.TextDocumentContentProvider {
       left,
       right,
       `${fileName} ↔ AI 修改建议`,
-      { preview: true, preserveFocus: true }
+      viewColumn === undefined
+        ? { preview: true, preserveFocus: true }
+        : { preview: true, preserveFocus: true, viewColumn }
     );
   }
 

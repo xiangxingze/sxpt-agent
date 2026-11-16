@@ -23,6 +23,8 @@ export interface AgentConfig {
   allowedCommands: string[];
   commandTimeoutMs: number;
   runTimeoutMs: number;
+  /** 对话窗口位置：编辑器右侧（默认）或底部面板 */
+  chatLocation: 'beside' | 'panel';
 }
 
 export const APPROVAL_MODE_LABELS: Record<ApprovalMode, string> = {
@@ -53,7 +55,8 @@ export function readConfig(): AgentConfig {
     includeProjectContext: cfg.get<boolean>('includeProjectContext') ?? true,
     allowedCommands: (cfg.get<string[]>('allowedCommands') || []).filter((c) => c.trim().length > 0),
     commandTimeoutMs: positive(cfg.get<number>('commandTimeoutMs'), 120_000),
-    runTimeoutMs: positive(cfg.get<number>('runTimeoutMs'), 600_000)
+    runTimeoutMs: positive(cfg.get<number>('runTimeoutMs'), 600_000),
+    chatLocation: cfg.get<string>('chatLocation') === 'panel' ? 'panel' : 'beside'
   };
 }
 

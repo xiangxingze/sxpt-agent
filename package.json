@@ -1,8 +1,8 @@
 {
   "name": "sxpt-agent",
   "displayName": "SXPT AI Coding Agent",
-  "description": "实训平台内置 VS Code 的 AI 编程 Agent：自主查看代码、修改文件、运行命令并验证，所有修改经 Diff 审核、可一键撤销。",
-  "version": "0.2.0",
+  "description": "实训平台内置 VS Code 的 AI 编程 Agent：自主查看代码、修改文件、运行命令并验证，所有修改经 Diff 审核、可一键撤销。界面全部使用 VS Code 原生组件，局域网 http 环境下也能使用。",
+  "version": "0.3.0",
   "publisher": "sxpt",
   "license": "MIT",
   "engines": {
@@ -37,117 +37,308 @@
     "views": {
       "ptnAgent": [
         {
-          "type": "webview",
-          "id": "ptnAgent.chatView",
-          "name": "代码助手"
+          "id": "ptnAgent.sessionView",
+          "name": "对话",
+          "icon": "media/agent.svg",
+          "contextualTitle": "AI Agent"
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "ptnAgent.sessionView",
+        "when": "!ptnAgent.configured",
+        "contents": "还没有连接模型服务。\n填写 API 地址、API Key 并选择模型后就可以开始。\n[配置模型服务](command:ptnAgent.settings)"
+      },
+      {
+        "view": "ptnAgent.sessionView",
+        "when": "ptnAgent.configured",
+        "contents": "今天想一起完成什么？\n描述一个目标，我会阅读代码、制定计划、修改文件并验证结果。每次修改都会先让你确认。\n[打开对话窗口](command:ptnAgent.openChat)\n[输入任务…](command:ptnAgent.ask)\n也可以从这些任务开始：\n· [理解项目结构](command:ptnAgent.explainProject)\n· [分析当前的错误和警告](command:ptnAgent.analyzeProblem)\n· [修复问题并验证](command:ptnAgent.fixProblems)\n· [解释选中的代码](command:ptnAgent.explainSelection)\n· [为选中的代码生成测试](command:ptnAgent.generateTests)"
+      }
+    ],
     "commands": [
       {
         "command": "ptnAgent.openChat",
-        "title": "AI Agent: 打开对话",
+        "title": "打开对话",
+        "category": "AI Agent",
         "icon": "$(comment-discussion)"
       },
       {
-        "command": "ptnAgent.explainSelection",
-        "title": "AI Agent: 解释选中代码"
+        "command": "ptnAgent.ask",
+        "title": "输入任务…",
+        "category": "AI Agent",
+        "icon": "$(edit)"
       },
       {
-        "command": "ptnAgent.analyzeProblem",
-        "title": "AI Agent: 分析当前错误"
-      },
-      {
-        "command": "ptnAgent.fixProblems",
-        "title": "AI Agent: 修复当前问题"
-      },
-      {
-        "command": "ptnAgent.generateTests",
-        "title": "AI Agent: 生成单元测试"
-      },
-      {
-        "command": "ptnAgent.explainProject",
-        "title": "AI Agent: 理解项目结构"
-      },
-      {
-        "command": "ptnAgent.refactorSelection",
-        "title": "AI Agent: 重构选中代码"
-      },
-      {
-        "command": "ptnAgent.settings",
-        "title": "AI Agent: 打开设置"
+        "command": "ptnAgent.stop",
+        "title": "停止当前任务",
+        "category": "AI Agent",
+        "icon": "$(debug-stop)"
       },
       {
         "command": "ptnAgent.newSession",
-        "title": "AI Agent: 新建对话"
-      },
-      {
-        "command": "ptnAgent.showContext",
-        "title": "AI Agent: 查看当前上下文"
+        "title": "新建对话",
+        "category": "AI Agent",
+        "icon": "$(add)"
       },
       {
         "command": "ptnAgent.undoLastPatch",
-        "title": "AI Agent: 撤销上次 AI 修改"
+        "title": "撤销上次 AI 修改",
+        "category": "AI Agent",
+        "icon": "$(discard)"
       },
       {
-        "command": "ptnAgent.runTests",
-        "title": "AI Agent: 运行测试或构建"
+        "command": "ptnAgent.settings",
+        "title": "打开设置",
+        "category": "AI Agent",
+        "icon": "$(gear)"
       },
       {
-        "command": "ptnAgent.runCommand",
-        "title": "AI Agent: 运行命令"
-      },
-      {
-        "command": "ptnAgent.showProjectOutline",
-        "title": "AI Agent: 查看项目结构摘要"
-      },
-      {
-        "command": "ptnAgent.gotoProblem",
-        "title": "AI Agent: 定位问题"
-      },
-      {
-        "command": "ptnAgent.checkPi",
-        "title": "AI Agent: 检查 Agent 运行环境"
+        "command": "ptnAgent.pickModel",
+        "title": "切换模型",
+        "category": "AI Agent"
       },
       {
         "command": "ptnAgent.pickMode",
-        "title": "AI Agent: 切换审批模式"
+        "title": "切换审批模式",
+        "category": "AI Agent"
+      },
+      {
+        "command": "ptnAgent.explainSelection",
+        "title": "解释选中代码",
+        "category": "AI Agent"
+      },
+      {
+        "command": "ptnAgent.refactorSelection",
+        "title": "重构选中代码",
+        "category": "AI Agent"
+      },
+      {
+        "command": "ptnAgent.generateTests",
+        "title": "生成单元测试",
+        "category": "AI Agent"
+      },
+      {
+        "command": "ptnAgent.analyzeProblem",
+        "title": "分析当前错误",
+        "category": "AI Agent"
+      },
+      {
+        "command": "ptnAgent.fixProblems",
+        "title": "修复当前问题",
+        "category": "AI Agent"
+      },
+      {
+        "command": "ptnAgent.explainProject",
+        "title": "理解项目结构",
+        "category": "AI Agent"
+      },
+      {
+        "command": "ptnAgent.gotoProblem",
+        "title": "定位问题",
+        "category": "AI Agent"
+      },
+      {
+        "command": "ptnAgent.showContext",
+        "title": "查看当前上下文",
+        "category": "AI Agent"
+      },
+      {
+        "command": "ptnAgent.showProjectOutline",
+        "title": "查看项目结构摘要",
+        "category": "AI Agent"
+      },
+      {
+        "command": "ptnAgent.runTests",
+        "title": "运行测试或构建",
+        "category": "AI Agent"
+      },
+      {
+        "command": "ptnAgent.runCommand",
+        "title": "运行命令",
+        "category": "AI Agent"
+      },
+      {
+        "command": "ptnAgent.checkPi",
+        "title": "检查 Agent 运行环境",
+        "category": "AI Agent"
+      },
+      {
+        "command": "ptnAgent.approval.allow",
+        "title": "允许",
+        "category": "AI Agent",
+        "icon": "$(check)"
+      },
+      {
+        "command": "ptnAgent.approval.deny",
+        "title": "拒绝",
+        "category": "AI Agent",
+        "icon": "$(close)"
+      },
+      {
+        "command": "ptnAgent.approval.diff",
+        "title": "查看修改（Diff）",
+        "category": "AI Agent",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "ptnAgent.openReply",
+        "title": "在编辑器中查看回答",
+        "category": "AI Agent"
+      }
+    ],
+    "submenus": [
+      {
+        "id": "ptnAgent.editorMenu",
+        "label": "AI Agent"
       }
     ],
     "menus": {
       "editor/context": [
         {
+          "submenu": "ptnAgent.editorMenu",
+          "group": "ptnAgent@1"
+        }
+      ],
+      "ptnAgent.editorMenu": [
+        {
           "command": "ptnAgent.explainSelection",
           "when": "editorHasSelection",
-          "group": "ptnAgent@1"
+          "group": "1_selection@1"
         },
         {
           "command": "ptnAgent.refactorSelection",
           "when": "editorHasSelection",
-          "group": "ptnAgent@2"
+          "group": "1_selection@2"
         },
         {
           "command": "ptnAgent.generateTests",
           "when": "editorHasSelection",
-          "group": "ptnAgent@3"
+          "group": "1_selection@3"
         },
         {
           "command": "ptnAgent.analyzeProblem",
-          "group": "ptnAgent@4"
+          "group": "2_problems@1"
         },
         {
           "command": "ptnAgent.fixProblems",
-          "group": "ptnAgent@5"
+          "group": "2_problems@2"
         },
         {
           "command": "ptnAgent.gotoProblem",
-          "group": "ptnAgent@6"
+          "group": "2_problems@3"
+        },
+        {
+          "command": "ptnAgent.openChat",
+          "group": "3_chat@1"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "ptnAgent.stop",
+          "when": "view == ptnAgent.sessionView && ptnAgent.busy",
+          "group": "navigation@0"
+        },
+        {
+          "command": "ptnAgent.openChat",
+          "when": "view == ptnAgent.sessionView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "ptnAgent.newSession",
+          "when": "view == ptnAgent.sessionView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "ptnAgent.undoLastPatch",
+          "when": "view == ptnAgent.sessionView",
+          "group": "navigation@3"
+        },
+        {
+          "command": "ptnAgent.settings",
+          "when": "view == ptnAgent.sessionView",
+          "group": "navigation@4"
+        },
+        {
+          "command": "ptnAgent.pickModel",
+          "when": "view == ptnAgent.sessionView",
+          "group": "1_config@1"
+        },
+        {
+          "command": "ptnAgent.pickMode",
+          "when": "view == ptnAgent.sessionView",
+          "group": "1_config@2"
+        },
+        {
+          "command": "ptnAgent.showContext",
+          "when": "view == ptnAgent.sessionView",
+          "group": "2_view@1"
+        },
+        {
+          "command": "ptnAgent.showProjectOutline",
+          "when": "view == ptnAgent.sessionView",
+          "group": "2_view@2"
+        },
+        {
+          "command": "ptnAgent.runTests",
+          "when": "view == ptnAgent.sessionView",
+          "group": "3_run@1"
+        },
+        {
+          "command": "ptnAgent.checkPi",
+          "when": "view == ptnAgent.sessionView",
+          "group": "4_env@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "ptnAgent.approval.diff",
+          "when": "view == ptnAgent.sessionView && viewItem == approvalEdit",
+          "group": "inline@0"
+        },
+        {
+          "command": "ptnAgent.approval.allow",
+          "when": "view == ptnAgent.sessionView && viewItem =~ /^approval/",
+          "group": "inline@1"
+        },
+        {
+          "command": "ptnAgent.approval.deny",
+          "when": "view == ptnAgent.sessionView && viewItem =~ /^approval/",
+          "group": "inline@2"
         }
       ],
       "commandPalette": [
         {
           "command": "ptnAgent.explainSelection",
           "when": "editorHasSelection"
+        },
+        {
+          "command": "ptnAgent.refactorSelection",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "ptnAgent.generateTests",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "ptnAgent.stop",
+          "when": "ptnAgent.busy"
+        },
+        {
+          "command": "ptnAgent.approval.allow",
+          "when": "false"
+        },
+        {
+          "command": "ptnAgent.approval.deny",
+          "when": "false"
+        },
+        {
+          "command": "ptnAgent.approval.diff",
+          "when": "false"
+        },
+        {
+          "command": "ptnAgent.openReply",
+          "when": "false"
         }
       ]
     },
@@ -162,6 +353,14 @@
         "key": "ctrl+alt+e",
         "mac": "cmd+alt+e",
         "when": "editorHasSelection"
+      },
+      {
+        "command": "workbench.action.terminal.sendSequence",
+        "key": "shift+enter",
+        "args": {
+          "text": "\u001b\r"
+        },
+        "when": "terminalFocus && ptnAgent.chatActive"
       }
     ],
     "configuration": {
@@ -182,15 +381,28 @@
           "default": "ask",
           "description": "Agent 审批模式"
         },
+        "ptnAgent.chatLocation": {
+          "type": "string",
+          "enum": [
+            "beside",
+            "panel"
+          ],
+          "enumDescriptions": [
+            "对话作为一个标签页显示在编辑器右侧（推荐）",
+            "对话显示在底部的终端面板里"
+          ],
+          "default": "beside",
+          "description": "对话窗口的位置，下次打开对话窗口时生效"
+        },
         "ptnAgent.baseUrl": {
           "type": "string",
           "default": "",
-          "description": "模型服务的 API 地址（OpenAI 兼容接口，需包含版本路径，例如 https://api.example.com/v1）。建议在侧栏「设置」页中填写。"
+          "description": "模型服务的 API 地址（OpenAI 兼容接口，需包含版本路径，例如 https://api.example.com/v1）。建议通过命令「AI Agent: 打开设置」填写。"
         },
         "ptnAgent.model": {
           "type": "string",
           "default": "",
-          "description": "模型名称，需要支持工具调用（function calling）。建议在侧栏「设置」页中从接口返回的列表里选择。"
+          "description": "模型名称，需要支持工具调用（function calling）。建议通过命令「AI Agent: 切换模型」从接口返回的列表里选择。"
         },
         "ptnAgent.contextWindow": {
           "type": "number",
@@ -226,6 +438,7 @@
         "ptnAgent.systemPromptExtra": {
           "type": "string",
           "default": "",
+          "editPresentation": "multilineText",
           "description": "自定义指令：追加到系统提示词，例如课程的代码规范"
         },
         "ptnAgent.includeProjectContext": {
@@ -254,12 +467,11 @@
     "watch": "tsc -watch -p ./",
     "package": "vsce package",
     "lint": "tsc --noEmit -p ./",
-    "check": "node scripts/check-policy.js && node scripts/check-commands.js && node scripts/check-session.js && node scripts/check-platform.js && node scripts/check-undo.js && node scripts/check-models.js && node scripts/check-pi-custom-provider.js && node scripts/check-agent.js && node scripts/check-chat.js && node scripts/check-webview.js && node scripts/smoke.js"
+    "check": "node scripts/check-policy.js && node scripts/check-commands.js && node scripts/check-session.js && node scripts/check-platform.js && node scripts/check-undo.js && node scripts/check-models.js && node scripts/check-pi-custom-provider.js && node scripts/check-agent.js && node scripts/check-chat.js && node scripts/check-tui.js && node scripts/smoke.js"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/vscode": "^1.90.0",
-    "jsdom": "^29.1.1",
     "typescript": "^5.7.2"
   },
   "dependencies": {

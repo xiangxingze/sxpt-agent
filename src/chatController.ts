@@ -1,24 +1,11 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import {
-  readConfig,
-  AgentConfig,
-  ApprovalMode,
-  APPROVAL_MODE_LABELS,
-  APPROVAL_MODE_HINTS,
-  isModelConfigured
-} from './config';
+import { readConfig, AgentConfig, APPROVAL_MODE_LABELS, isModelConfigured } from './config';
 import { SecretStore } from './secrets';
 import { collectContext, contextToPrompt } from './contextCollector';
-import { getChatHtml } from './webviewHtml';
 import { PiAgent } from './agent/piAgent';
 import { SessionStore } from './agent/session';
-import {
-  AgentHost,
-  AgentSettings,
-  ApprovalDecision,
-  ApprovalRequest
-} from './agent/types';
+import { AgentHost, AgentSettings, ApprovalDecision, ApprovalRequest } from './agent/types';
 import { toFriendlyError } from './modelCheck';
 import { ChangeTracker } from './changeTracker';
 import { DiffPreview } from './diffPreview';
@@ -27,6 +14,7 @@ import { isInsideRoots } from './agent/policy';
 import { PlatformClient, courseContextToPrompt } from './platform/client';
 import { getProjectOutline } from './project/outline';
 import { runCommand, isDangerous, isWhitelisted, detectTestCommand } from './tools/commandRunner';
+import { compactDiff } from './ui/diffLines';
 
 export type QuickAction = 'explain' | 'problem' | 'fix' | 'tests' | 'project' | 'refactor' | 'runTests';
 
@@ -67,10 +55,28 @@ interface PendingApproval {
   finish: (decision: ApprovalDecision) => void;
 }
 
-export class ChatViewProvider implements vscode.WebviewViewProvider {
-  public static readonly viewType = 'ptnAgent.chatView';
+/**
+ * 对话界面（由 ChatTerminal 实现）。控制器只依赖这个接口，不关心界面如何绘制。
+ *
+ * 约定：界面发出 `ready` 时，控制器会在同一次调用里同步回送 `state` 和 `history`，
+ * 界面据此把「打开前收到的消息」排在历史记录之后。
+ */
+export interface ChatSurface {
+  /** 界面当前能否直接完成审批；不能时控制器改用原生弹窗 */
+  readonly canApprove: boolean;
+  post(message: unknown): void;
+  reveal(preserveFocus?: boolean): Promise<void>;
+  /** 打开文件 / Diff 时使用的编辑器列，避免盖住对话窗口 */
+  docColumn(): vscode.ViewColumn | undefined;
+}
 
-  private view?: vscode.WebviewView;
+/**
+ * Agent 的 VS Code 宿主：负责一次任务的完整流程（上下文、运行、审批、撤销快照、汇总），
+ * 并把过程以消息的形式广播给对话界面和侧栏树视图。
+ */
+export class ChatController {
+  private surface?: ChatSurface;
+  private readonly observers: Array<(message: any) => void> = [];
   private busy = false;
   private abort?: AbortController;
   private readonly agent: PiAgent;
@@ -78,11 +84,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   /** 学生手动运行的命令输出，随下一条消息附带一次后清空 */
   private pendingContexts: string[] = [];
   private readonly settings: SettingsController;
-  private showSettingsOnReady = false;
   private readonly pendingApprovals = new Map<string, PendingApproval>();
 
   constructor(
-    private readonly extensionUri: vscode.Uri,
     private readonly secrets: SecretStore,
     private readonly tracker: ChangeTracker,
     private readonly diffs: DiffPreview,
@@ -92,14 +96,49 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     context: vscode.ExtensionContext
   ) {
     this.session = new SessionStore(context);
-    this.settings = new SettingsController(
-      context,
-      secrets,
-      output,
-      (message) => this.post(message),
-      () => this.pushState()
-    );
+    this.settings = new SettingsController(context, secrets, output, () => this.pushState());
     this.agent = new PiAgent(this.createHost(), (line) => this.output.appendLine(line), context.globalStorageUri?.fsPath);
+  }
+
+  // ---------------- 界面 ----------------
+
+  attachSurface(surface: ChatSurface): void {
+    this.surface = surface;
+  }
+
+  /** 订阅全部界面消息（侧栏树视图用）；订阅时立即补发当前状态和历史对话 */
+  addObserver(observer: (message: any) => void): void {
+    this.observers.push(observer);
+    observer(this.stateMessage());
+    observer(this.historyMessage());
+  }
+
+  private post(message: unknown): void {
+    this.surface?.post(message);
+    for (const observer of this.observers) {
+      try {
+        observer(message);
+      } catch (err) {
+        this.output.appendLine(`[ui] ${(err as Error).message}`);
+      }
+    }
+  }
+
+  private notify(text: string, level: 'info' | 'warn' = 'info'): void {
+    this.post({ type: 'notice', text, level });
+  }
+
+  async reveal(preserveFocus = false): Promise<void> {
+    await this.surface?.reveal(preserveFocus);
+  }
+
+  private historyMessage(): { type: 'history'; messages: Array<{ role: string; content: string }> } {
+    return {
+      type: 'history',
+      messages: this.session.all
+        .filter((m) => m.role === 'user' || m.role === 'assistant')
+        .map((m) => ({ role: m.role, content: m.content }))
+    };
   }
 
   // ---------------- Agent 宿主能力 ----------------
@@ -162,6 +201,35 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   // ---------------- 审批 ----------------
 
+  /** 发给界面的审批信息：不含文件全文，只带精简的行级 Diff */
+  private approvalView(request: ApprovalRequest): Record<string, unknown> {
+    return {
+      id: request.id,
+      kind: request.kind,
+      title: request.title,
+      relPath: request.relPath,
+      command: request.command,
+      cwd: request.cwd,
+      isNewFile: request.isNewFile,
+      added: request.added,
+      removed: request.removed,
+      canDiff: request.kind !== 'bash',
+      diff:
+        request.kind !== 'bash' && request.proposed !== undefined
+          ? compactDiff(request.original ?? '', request.proposed)
+          : undefined
+    };
+  }
+
+  private showDiff(request: ApprovalRequest): void {
+    if (request.kind === 'bash') {
+      return;
+    }
+    void this.diffs
+      .show(request, this.surface?.docColumn())
+      .catch((err) => this.output.appendLine(`[diff] ${(err as Error).message}`));
+  }
+
   private requestApproval(request: ApprovalRequest, signal: AbortSignal): Promise<ApprovalDecision> {
     return new Promise<ApprovalDecision>((resolve) => {
       let settled = false;
@@ -173,6 +241,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.pendingApprovals.delete(request.id);
         signal.removeEventListener('abort', onAbort);
         this.post({ type: 'approvalDone', id: request.id, decision });
+        this.updateStatusBar();
         void this.diffs.close(request.id);
         resolve(decision);
       };
@@ -183,37 +252,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
       signal.addEventListener('abort', onAbort);
       this.pendingApprovals.set(request.id, { request, finish });
+      this.updateStatusBar();
 
-      if (this.view?.visible) {
-        this.post({
-          type: 'approval',
-          request: {
-            id: request.id,
-            kind: request.kind,
-            title: request.title,
-            relPath: request.relPath,
-            command: request.command,
-            cwd: request.cwd,
-            isNewFile: request.isNewFile,
-            added: request.added,
-            removed: request.removed,
-            canDiff: request.kind !== 'bash'
-          }
-        });
-        if (request.kind !== 'bash') {
-          void this.diffs.show(request).catch((err) => this.output.appendLine(`[diff] ${(err as Error).message}`));
-        }
+      // 对话窗口和侧栏树视图都会显示这条待确认的操作
+      this.post({ type: 'approval', request: this.approvalView(request) });
+      if (this.surface?.canApprove) {
+        // 把对话窗口带到前面，但不抢走编辑器的焦点
+        void this.surface.reveal(true);
+        this.showDiff(request);
       } else {
-        // 侧栏不可见时改用原生弹窗，避免 Agent 卡在等待审批
+        // 对话窗口已关闭时改用原生弹窗，避免 Agent 卡在等待审批
         void this.nativeApproval(request).then(finish);
       }
     });
   }
 
   private async nativeApproval(request: ApprovalRequest): Promise<ApprovalDecision> {
-    if (request.kind !== 'bash') {
-      void this.diffs.show(request).catch(() => undefined);
-    }
+    this.showDiff(request);
     const detail =
       request.kind === 'bash'
         ? `命令：${request.command}\n工作目录：${request.cwd}`
@@ -235,31 +290,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  // ---------------- 视图 ----------------
-
-  resolveWebviewView(view: vscode.WebviewView): void {
-    this.view = view;
-    view.webview.options = {
-      enableScripts: true,
-      localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'media')]
-    };
-    view.webview.html = getChatHtml(view.webview, this.extensionUri);
-    view.webview.onDidReceiveMessage((msg) => void this.onMessage(msg));
-    view.onDidChangeVisibility(() => {
-      if (view.visible) {
-        void this.refreshContext();
-      }
-    });
-    view.onDidDispose(() => {
-      if (this.view === view) {
-        this.view = undefined;
-      }
-    });
+  private findApproval(id: string | undefined): PendingApproval | undefined {
+    return id ? this.pendingApprovals.get(id) : this.pendingApprovals.values().next().value;
   }
 
-  async reveal(): Promise<void> {
-    await vscode.commands.executeCommand('ptnAgent.chatView.focus');
+  /** 侧栏树视图上的「允许 / 拒绝」按钮 */
+  resolveApproval(id: string | undefined, decision: ApprovalDecision): void {
+    this.findApproval(id)?.finish(decision);
   }
+
+  /** 重新打开某个待确认修改的 Diff */
+  async openDiff(id: string | undefined): Promise<void> {
+    const pending = this.findApproval(id);
+    if (pending && pending.request.kind !== 'bash') {
+      await this.diffs.show(pending.request, this.surface?.docColumn());
+    }
+  }
+
+  // ---------------- 会话 ----------------
 
   async newSession(): Promise<void> {
     this.abort?.abort();
@@ -276,35 +324,64 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     await this.pushState();
   }
 
+  stop(): void {
+    this.abort?.abort();
+  }
+
   dispose(): void {
     this.abort?.abort();
     this.cancelPendingApprovals();
     this.agent.dispose();
   }
 
-  private post(message: unknown): void {
-    void this.view?.webview.postMessage(message);
+  /** 用原生输入框发起一次任务（侧栏欢迎页、命令面板） */
+  async ask(): Promise<void> {
+    if (this.busy) {
+      void vscode.window.showInformationMessage('Agent 正在运行，请等它完成或先停止。');
+      await this.reveal();
+      return;
+    }
+    if (!isModelConfigured(readConfig())) {
+      await this.openSettings();
+      return;
+    }
+    const text = await vscode.window.showInputBox({
+      title: 'AI Agent',
+      prompt: '描述一个目标，我会阅读代码、制定计划、修改文件并验证结果',
+      placeHolder: '例如：修复登录页的报错并运行测试',
+      ignoreFocusOut: true
+    });
+    if (!text || !text.trim()) {
+      return;
+    }
+    await this.reveal();
+    await this.handleUserText(text);
   }
 
-  private notify(text: string, level: 'info' | 'warn' = 'info'): void {
-    this.post({ type: 'notice', text, level });
-  }
-
-  private async onMessage(msg: any): Promise<void> {
+  /** 对话界面发来的用户操作 */
+  async onMessage(msg: any): Promise<void> {
     switch (msg?.type) {
       case 'ready':
-        await this.pushState();
-        if (this.showSettingsOnReady) {
-          this.showSettingsOnReady = false;
-          this.post({ type: 'showSettings' });
+        // 同步回送状态与历史（见 ChatSurface 的约定），随后补发仍在等待的审批
+        this.surface?.post(this.stateMessage());
+        this.surface?.post(this.historyMessage());
+        for (const pending of this.pendingApprovals.values()) {
+          this.surface?.post({ type: 'approval', request: this.approvalView(pending.request) });
         }
+        this.updateStatusBar();
         void this.settings.refreshModelsIfNeeded();
+        break;
+      case 'closed':
+        // 对话窗口被关闭：仍在等待的审批改用原生弹窗，避免任务卡住
+        for (const pending of [...this.pendingApprovals.values()]) {
+          void this.nativeApproval(pending.request).then(pending.finish);
+        }
         break;
       case 'send':
         await this.handleUserText(String(msg.text ?? ''));
         break;
       case 'stop':
-        this.abort?.abort();
+        this.stop();
         break;
       case 'newSession':
         await this.newSession();
@@ -320,43 +397,61 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           msg.decision === 'allow' || msg.decision === 'allowAllEdits' ? msg.decision : 'deny'
         );
         break;
-      case 'openDiff': {
-        const pending = this.pendingApprovals.get(String(msg.id));
-        if (pending) {
-          await this.diffs.show(pending.request);
-        }
+      case 'openDiff':
+        await this.openDiff(String(msg.id));
         break;
-      }
       case 'undo':
-        await this.tracker.undoLast();
-        await this.pushState();
-        break;
-      case 'copy':
-        if (typeof msg.text === 'string' && msg.text.length < 1_000_000) {
-          await vscode.env.clipboard.writeText(msg.text);
-        }
+        await this.undo();
         break;
       case 'openFile':
         await this.openFileRef(String(msg.ref ?? ''));
         break;
+      case 'openSettings':
+        await this.openSettings();
+        break;
+      case 'pickModel':
+        await this.pickModel();
+        break;
+      case 'pickMode':
+        await this.pickApprovalMode();
+        break;
       default:
-        await this.settings.handle(msg);
         break;
     }
   }
 
-  /** 打开设置页（侧栏内的单页设置）。侧栏尚未创建时，等 ready 后再展示。 */
-  async openSettings(): Promise<void> {
-    if (this.view) {
-      this.post({ type: 'showSettings' });
-    } else {
-      this.showSettingsOnReady = true;
+  async undo(): Promise<void> {
+    if (this.busy) {
+      void vscode.window.showInformationMessage('Agent 正在运行，请等它完成或先停止后再撤销。');
+      return;
     }
-    await this.reveal();
+    await this.tracker.undoLast();
+    await this.pushState();
   }
 
-  /** 点击回答里的「文件:行号」引用，在编辑器中打开 */
-  private async openFileRef(ref: string): Promise<void> {
+  // ---------------- 设置（原生 QuickPick / InputBox） ----------------
+
+  async openSettings(): Promise<void> {
+    const wasConfigured = isModelConfigured(readConfig());
+    await this.settings.open();
+    // 首次配置完成后直接打开对话窗口
+    if (!wasConfigured && isModelConfigured(readConfig())) {
+      await this.reveal();
+    }
+  }
+
+  async pickModel(): Promise<void> {
+    await this.settings.pickModel();
+  }
+
+  async pickApprovalMode(): Promise<void> {
+    await this.settings.pickMode();
+  }
+
+  // ---------------- 打开文件 / 回答 ----------------
+
+  /** 点击对话里的「文件:行号」引用，在编辑器中打开 */
+  async openFileRef(ref: string): Promise<void> {
     const match = /^(.+?)(?::(\d+))?(?::\d+)?$/.exec(ref.trim());
     if (!match) {
       return;
@@ -384,46 +479,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const position = new vscode.Position(Math.min(line, Math.max(0, doc.lineCount - 1)), 0);
     await vscode.window.showTextDocument(doc, {
       selection: new vscode.Range(position, position),
-      preview: true
+      preview: true,
+      viewColumn: this.surface?.docColumn()
     });
   }
 
-  async pickApprovalMode(): Promise<void> {
-    const current = readConfig().approvalMode;
-    const items: Array<vscode.QuickPickItem & { value: ApprovalMode }> = [
-      {
-        label: '逐项确认',
-        description: current === 'ask' ? '当前' : '',
-        detail: APPROVAL_MODE_HINTS.ask,
-        value: 'ask'
-      },
-      {
-        label: '自动应用修改',
-        description: current === 'autoEdit' ? '当前' : '',
-        detail: APPROVAL_MODE_HINTS.autoEdit,
-        value: 'autoEdit'
-      },
-      {
-        label: '只读',
-        description: current === 'readOnly' ? '当前' : '',
-        detail: APPROVAL_MODE_HINTS.readOnly,
-        value: 'readOnly'
-      }
-    ];
-    const picked = await vscode.window.showQuickPick(items, { title: 'Agent 审批模式' });
-    if (!picked) {
+  /** 把一条回答作为 Markdown 文档在编辑器中打开，便于完整阅读、复制 */
+  async openReply(text: string): Promise<void> {
+    if (!text || !text.trim()) {
       return;
     }
-    await vscode.workspace
-      .getConfiguration('ptnAgent')
-      .update('approvalMode', picked.value, vscode.ConfigurationTarget.Global);
-    await this.pushState();
+    const doc = await vscode.workspace.openTextDocument({ content: text, language: 'markdown' });
+    await vscode.window.showTextDocument(doc, { preview: true, viewColumn: this.surface?.docColumn() });
   }
 
-  async pushState(): Promise<void> {
+  // ---------------- 状态 ----------------
+
+  private stateMessage(): Record<string, unknown> {
     const cfg = readConfig();
     const label = this.describeContext();
-    this.post({
+    return {
       type: 'state',
       configured: isModelConfigured(cfg),
       model: cfg.model,
@@ -435,19 +510,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       contextWarn: label.indexOf('未打开') >= 0,
       sessionCount: this.session.count,
       undoCount: this.tracker.undoCount
-    });
+    };
+  }
+
+  async pushState(): Promise<void> {
+    this.post(this.stateMessage());
     this.updateStatusBar();
   }
 
   private updateStatusBar(): void {
     const cfg = readConfig();
+    let background: vscode.ThemeColor | undefined;
     if (!isModelConfigured(cfg)) {
-      this.statusBar.text = '$(comment-discussion) 未配置模型';
-      this.statusBar.tooltip = '点击打开 AI Agent，并在设置中配置模型服务';
+      this.statusBar.text = '$(sparkle) 未配置模型';
+      this.statusBar.tooltip = '点击打开 AI Agent，并配置模型服务';
+    } else if (this.pendingApprovals.size > 0) {
+      this.statusBar.text = '$(warning) AI Agent 等待确认';
+      this.statusBar.tooltip = '有操作正在等待你的确认，点击打开对话窗口';
+      background = new vscode.ThemeColor('statusBarItem.warningBackground');
     } else {
-      this.statusBar.text = this.busy ? `$(sync~spin) ${cfg.model}` : `$(comment-discussion) ${cfg.model}`;
+      this.statusBar.text = this.busy ? `$(sync~spin) ${cfg.model}` : `$(sparkle) ${cfg.model}`;
       this.statusBar.tooltip = `AI Agent · ${APPROVAL_MODE_LABELS[cfg.approvalMode]} · ${cfg.baseUrl}`;
     }
+    this.statusBar.backgroundColor = background;
     this.statusBar.show();
   }
 
@@ -466,7 +551,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   async refreshContext(): Promise<void> {
     const label = this.describeContext();
-    this.post({ type: 'context', label, warn: label.indexOf('未打开') >= 0 });
+    this.surface?.post({ type: 'context', label, warn: label.indexOf('未打开') >= 0 });
   }
 
   async runQuickAction(action: QuickAction): Promise<void> {
@@ -719,6 +804,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (!command || !command.trim()) {
       return;
     }
+    await this.reveal();
     await this.confirmAndRun(command.trim(), readConfig());
   }
 
