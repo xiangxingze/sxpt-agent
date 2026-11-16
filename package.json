@@ -2,7 +2,7 @@
   "name": "sxpt-agent",
   "displayName": "SXPT AI Coding Agent",
   "description": "实训平台内置 VS Code 的 AI 编程 Agent：原生终端对话、会话历史、QuickPick 设置、Diff 审核与撤销，支持局域网 HTTP code-server。",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "publisher": "sxpt",
   "license": "MIT",
   "engines": {
