@@ -102,7 +102,7 @@ npm run compile
 ```bash
 npm install -g @vscode/vsce
 npm run package
-code --install-extension sxpt-agent-0.3.0.vsix
+code --install-extension sxpt-agent-0.3.1.vsix
 ```
 
 安装包约 26 MB，已包含 Pi 运行依赖。
