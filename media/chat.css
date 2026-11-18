@@ -1,0 +1,65 @@
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body { margin: 0; color: var(--vscode-foreground, #414141); background: var(--vscode-sideBar-background, #f2f2f2); font: var(--vscode-font-size, 13px)/1.5 var(--vscode-font-family, "Segoe UI", sans-serif); }
+button, input, textarea { font: inherit; color: inherit; }
+button { border: 0; background: transparent; cursor: pointer; border-radius: 4px; padding: 4px; }
+button:hover { background: var(--vscode-toolbar-hoverBackground, #0000000b); }
+button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 1px solid var(--vscode-focusBorder, #7153a1); outline-offset: 1px; }
+button:disabled { opacity: .45; cursor: default; }
+[hidden] { display: none !important; }
+svg { width: 16px; height: 16px; display: block; flex: 0 0 16px; }
+.workbench { height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
+.sessions { padding: 0 14px; flex-shrink: 0; max-height: 36%; overflow: auto; }
+.section-heading { display: flex; align-items: center; justify-content: space-between; min-height: 28px; font-weight: 600; }
+nav, .tool-group { display: flex; align-items: center; gap: 2px; }
+nav button { padding: 3px 5px; }
+button[aria-pressed="true"] { background: var(--vscode-list-activeSelectionBackground, #ded4ed); color: var(--vscode-list-activeSelectionForeground, #414141); }
+#search { width: 100%; margin: 4px 0 8px; padding: 4px 7px; border: 1px solid var(--vscode-input-border, #ccc); background: var(--vscode-input-background, #fff); color: var(--vscode-input-foreground, #414141); border-radius: 3px; }
+.session { width: 100%; display: flex; text-align: left; align-items: flex-start; gap: 10px; padding: 8px 6px; line-height: 1.45; }
+.session-dot { width: 4px; height: 4px; background: var(--vscode-descriptionForeground, #999); opacity: .35; border-radius: 50%; margin-top: 7px; flex: 0 0 4px; }
+.session.active .session-dot { background: var(--vscode-focusBorder, #7153a1); opacity: 1; }
+.session-content { min-width: 0; }
+.session-title { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.session-meta { display: flex; align-items: center; gap: 5px; color: var(--vscode-descriptionForeground, #777); font-size: 11px; }
+.session-meta svg { width: 13px; height: 13px; flex-basis: 13px; }
+.more { display: flex; justify-content: space-between; width: 100%; padding: 7px 8px; font-size: 12px; }
+#more-count { color: var(--vscode-descriptionForeground, #888); }
+.empty-sessions { margin: 8px 6px; color: var(--vscode-descriptionForeground, #888); font-size: 12px; }
+.conversation { flex: 1; min-height: 0; overflow: auto; padding: 12px 16px 20px; overflow-wrap: anywhere; }
+.message { margin: 0 0 20px; }
+.message-heading { font-size: 12px; font-weight: 600; display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
+.message-body { white-space: pre-wrap; line-height: 1.65; }
+.message-body pre { white-space: pre; overflow: auto; background: var(--vscode-textCodeBlock-background, #e7e7e7); padding: 10px; border-radius: 5px; font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; }
+.message-body code { font-family: var(--vscode-editor-font-family, monospace); }
+.steps { font-size: 12px; color: var(--vscode-descriptionForeground, #777); margin: 6px 0; }
+.step { padding: 3px 0; }
+.error, .approval { color: var(--vscode-errorForeground, #b34242); }
+.notice, #plan, .approval { margin: 8px 0 14px; border: 1px solid var(--vscode-widget-border, #ddd); padding: 10px; border-radius: 5px; white-space: pre-wrap; }
+.approval { color: inherit; }
+.approval-actions { display: flex; gap: 8px; margin-top: 8px; }
+.approval-actions button { background: var(--vscode-button-secondaryBackground, #dedede); padding: 3px 10px; }
+.file-link { color: var(--vscode-textLink-foreground, #3569a0); text-align: left; display: block; }
+.footer { flex-shrink: 0; padding: 0 14px 3px; }
+.composer { background: var(--vscode-editor-background, #fff); border: 1px solid transparent; border-radius: 9px; padding: 7px 8px 4px; }
+.composer:focus-within { border-color: var(--vscode-focusBorder, #7153a1); }
+.hint { font-size: 12px; margin: 0 0 14px; line-height: 1.5; }
+.input-row { display: flex; align-items: flex-start; gap: 3px; min-height: 33px; }
+.mention { color: var(--vscode-textLink-foreground, #2764a1); background: var(--vscode-editor-inactiveSelectionBackground, #dbe8fd); border-radius: 3px; font-size: 12px; margin-top: 1px; padding: 0 2px; }
+textarea { width: 100%; resize: none; min-height: 33px; max-height: 160px; border: 0; padding: 0; background: transparent; outline: none !important; line-height: 1.6; font-size: 12px; }
+textarea::placeholder { color: var(--vscode-input-placeholderForeground, #a0a0a0); }
+.composer-tools { display: flex; justify-content: space-between; align-items: center; gap: 6px; margin-top: 3px; }
+.tool-group { min-width: 0; flex: 1; }
+.text-button { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; min-width: 0; font-size: 11px; padding: 3px; }
+.text-button svg { width: 13px; height: 13px; flex-basis: 13px; }
+.model-button { max-width: 65%; }
+#model { overflow: hidden; text-overflow: ellipsis; }
+.chevron { opacity: .65; font-size: 10px; }
+.send { border-radius: 50%; width: 23px; height: 23px; display: grid; place-items: center; flex-shrink: 0; background: var(--vscode-extensionButton-prominentBackground, #75549e); color: var(--vscode-extensionButton-prominentForeground, #fff); }
+.send:hover { background: var(--vscode-extensionButton-prominentHoverBackground, #64458c); }
+.send svg { width: 15px; height: 15px; }
+.status { display: flex; align-items: center; gap: 5px; min-height: 27px; font-size: 11px; color: var(--vscode-descriptionForeground, #777); }
+.status .text-button:first-child { color: var(--vscode-foreground, #414141); }
+.divider { height: 12px; border-left: 1px solid var(--vscode-widget-border, #ccc); }
+.context { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; font-size: 10px; }
+#run-status { white-space: nowrap; font-size: 10px; }
+@media (max-width: 320px) { .footer, .sessions { padding-left: 8px; padding-right: 8px; } .hint { font-size: 11px; } .context { display: none; } .model-button { max-width: 52%; } }

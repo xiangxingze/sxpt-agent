@@ -1,8 +1,8 @@
 {
   "name": "sxpt-agent",
   "displayName": "SXPT AI Coding Agent",
-  "description": "实训平台内置 VS Code 的 AI 编程 Agent：按 V4 原型绘制的原生终端对话（欢迎页、消息气泡、确认卡片）、会话历史、QuickPick 设置、Diff 审核与撤销，支持局域网 HTTP code-server。",
-  "version": "0.4.0",
+  "description": "实训平台内置 VS Code 的 AI 编程 Agent：会话列表、流式对话与底部输入区一体化侧栏，支持局域网 HTTP code-server。",
+  "version": "0.5.2",
   "publisher": "sxpt",
   "license": "MIT",
   "engines": {
@@ -29,7 +29,7 @@
       "activitybar": [
         {
           "id": "ptnAgent",
-          "title": "AI Coding Agent",
+          "title": "SXPT 聊天",
           "icon": "media/agent.svg"
         }
       ]
@@ -38,16 +38,37 @@
       "ptnAgent": [
         {
           "id": "ptnAgent.sessionView",
-          "name": "对话",
+          "name": "聊天",
+          "type": "webview",
+          "when": "!ptnAgent.nativeFallback",
           "icon": "media/agent.svg",
-          "contextualTitle": "AI Agent"
+          "contextualTitle": "SXPT 聊天"
+        },
+        {
+          "id": "ptnAgent.nativeSessionView",
+          "name": "聊天（兼容模式）",
+          "when": "ptnAgent.nativeFallback",
+          "icon": "media/agent.svg",
+          "contextualTitle": "SXPT 聊天"
         }
       ]
     },
     "commands": [
       {
+        "command": "ptnAgent.useNativeChat",
+        "title": "切换原生兼容聊天",
+        "category": "AI Agent",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "ptnAgent.retryChatView",
+        "title": "重试完整聊天界面",
+        "category": "AI Agent",
+        "icon": "$(refresh)"
+      },
+      {
         "command": "ptnAgent.openTerminalChat",
-        "title": "打开原生备用对话",
+        "title": "打开 Agent 面板",
         "category": "AI Agent"
       },
       {
@@ -58,7 +79,7 @@
       },
       {
         "command": "ptnAgent.openChat",
-        "title": "打开对话",
+        "title": "打开 SXPT 聊天",
         "category": "AI Agent",
         "icon": "$(comment-discussion)"
       },
@@ -91,6 +112,36 @@
         "title": "打开设置",
         "category": "AI Agent",
         "icon": "$(gear)"
+      },
+      {
+        "command": "ptnAgent.selectSession",
+        "title": "打开历史会话",
+        "category": "AI Agent"
+      },
+      {
+        "command": "ptnAgent.setup",
+        "title": "连接模型服务",
+        "category": "AI Agent"
+      },
+      {
+        "command": "ptnAgent.editBaseUrl",
+        "title": "编辑 API 地址",
+        "category": "AI Agent"
+      },
+      {
+        "command": "ptnAgent.editApiKey",
+        "title": "编辑 API Key",
+        "category": "AI Agent"
+      },
+      {
+        "command": "ptnAgent.testConnection",
+        "title": "测试 Agent 连接",
+        "category": "AI Agent"
+      },
+      {
+        "command": "ptnAgent.settingsMenu",
+        "title": "打开完整设置菜单",
+        "category": "AI Agent"
       },
       {
         "command": "ptnAgent.pickModel",
@@ -232,47 +283,35 @@
           "group": "3_chat@1"
         }
       ],
-      "editor/title": [
+      "view/title": [
         {
-          "command": "ptnAgent.stop",
-          "when": "resourceScheme == vscode-terminal && ptnAgent.chatActive && ptnAgent.busy",
+          "command": "ptnAgent.ask",
+          "when": "view == ptnAgent.nativeSessionView",
           "group": "navigation@0"
         },
         {
+          "command": "ptnAgent.ask",
+          "when": "view == ptnAgent.sessionView",
+          "group": "1_chat@0"
+        },
+        {
           "command": "ptnAgent.newSession",
-          "when": "resourceScheme == vscode-terminal && ptnAgent.chatActive",
+          "when": "view == ptnAgent.sessionView || view == ptnAgent.nativeSessionView",
           "group": "navigation@1"
         },
         {
           "command": "ptnAgent.history",
-          "when": "resourceScheme == vscode-terminal && ptnAgent.chatActive",
+          "when": "view == ptnAgent.sessionView || view == ptnAgent.nativeSessionView",
           "group": "navigation@2"
         },
         {
           "command": "ptnAgent.settings",
-          "when": "resourceScheme == vscode-terminal && ptnAgent.chatActive",
-          "group": "navigation@3"
-        }
-      ],
-      "view/title": [
-        {
-          "command": "ptnAgent.newSession",
-          "when": "view == ptnAgent.sessionView",
-          "group": "navigation@1"
-        },
-        {
-          "command": "ptnAgent.history",
-          "when": "view == ptnAgent.sessionView",
-          "group": "navigation@2"
-        },
-        {
-          "command": "ptnAgent.settings",
-          "when": "view == ptnAgent.sessionView",
+          "when": "view == ptnAgent.sessionView || view == ptnAgent.nativeSessionView",
           "group": "navigation@3"
         },
         {
           "command": "ptnAgent.stop",
-          "when": "view == ptnAgent.sessionView && ptnAgent.busy",
+          "when": "(view == ptnAgent.sessionView || view == ptnAgent.nativeSessionView) && ptnAgent.busy",
           "group": "navigation@4"
         },
         {
@@ -282,44 +321,54 @@
         },
         {
           "command": "ptnAgent.undoLastPatch",
-          "when": "view == ptnAgent.sessionView",
+          "when": "view == ptnAgent.sessionView || view == ptnAgent.nativeSessionView",
           "group": "1_chat@2"
         },
         {
           "command": "ptnAgent.showContext",
-          "when": "view == ptnAgent.sessionView",
+          "when": "view == ptnAgent.sessionView || view == ptnAgent.nativeSessionView",
           "group": "2_context@1"
         },
         {
           "command": "ptnAgent.showProjectOutline",
-          "when": "view == ptnAgent.sessionView",
+          "when": "view == ptnAgent.sessionView || view == ptnAgent.nativeSessionView",
           "group": "2_context@2"
         },
         {
           "command": "ptnAgent.runTests",
-          "when": "view == ptnAgent.sessionView",
+          "when": "view == ptnAgent.sessionView || view == ptnAgent.nativeSessionView",
           "group": "3_run@1"
         },
         {
           "command": "ptnAgent.checkPi",
-          "when": "view == ptnAgent.sessionView",
+          "when": "view == ptnAgent.sessionView || view == ptnAgent.nativeSessionView",
           "group": "4_env@1"
+        },
+        {
+          "command": "ptnAgent.useNativeChat",
+          "when": "view == ptnAgent.sessionView",
+          "group": "5_view@1"
+        },
+        {
+          "command": "ptnAgent.retryChatView",
+          "when": "view == ptnAgent.nativeSessionView",
+          "group": "5_view@1"
         }
       ],
       "view/item/context": [
         {
           "command": "ptnAgent.approval.diff",
-          "when": "view == ptnAgent.sessionView && viewItem == approvalEdit",
+          "when": "view == ptnAgent.nativeSessionView && viewItem == approvalEdit",
           "group": "inline@0"
         },
         {
           "command": "ptnAgent.approval.allow",
-          "when": "view == ptnAgent.sessionView && viewItem =~ /^approval/",
+          "when": "view == ptnAgent.nativeSessionView && viewItem =~ /^approval/",
           "group": "inline@1"
         },
         {
           "command": "ptnAgent.approval.deny",
-          "when": "view == ptnAgent.sessionView && viewItem =~ /^approval/",
+          "when": "view == ptnAgent.nativeSessionView && viewItem =~ /^approval/",
           "group": "inline@2"
         }
       ],
@@ -359,28 +408,44 @@
         {
           "command": "ptnAgent.openTerminalChat",
           "when": "false"
+        },
+        {
+          "command": "ptnAgent.selectSession",
+          "when": "false"
+        },
+        {
+          "command": "ptnAgent.setup",
+          "when": "false"
+        },
+        {
+          "command": "ptnAgent.editBaseUrl",
+          "when": "false"
+        },
+        {
+          "command": "ptnAgent.editApiKey",
+          "when": "false"
+        },
+        {
+          "command": "ptnAgent.testConnection",
+          "when": "false"
+        },
+        {
+          "command": "ptnAgent.settingsMenu",
+          "when": "false"
         }
       ]
     },
     "keybindings": [
       {
         "command": "ptnAgent.openChat",
-        "key": "ctrl+alt+i",
-        "mac": "cmd+alt+i"
+        "key": "ctrl+alt+shift+i",
+        "mac": "cmd+alt+shift+i"
       },
       {
         "command": "ptnAgent.explainSelection",
         "key": "ctrl+alt+e",
         "mac": "cmd+alt+e",
         "when": "editorHasSelection"
-      },
-      {
-        "command": "workbench.action.terminal.sendSequence",
-        "key": "shift+enter",
-        "args": {
-          "text": "\u001b\r"
-        },
-        "when": "terminalFocus && ptnAgent.chatActive"
       }
     ],
     "configuration": {
@@ -400,19 +465,6 @@
           ],
           "default": "ask",
           "description": "Agent 审批模式"
-        },
-        "ptnAgent.chatLocation": {
-          "type": "string",
-          "enum": [
-            "beside",
-            "panel"
-          ],
-          "enumDescriptions": [
-            "对话作为一个标签页显示在编辑器右侧（推荐）",
-            "对话显示在底部的终端面板里"
-          ],
-          "default": "beside",
-          "description": "原生对话终端的位置，下次打开对话终端时生效"
         },
         "ptnAgent.baseUrl": {
           "type": "string",
@@ -480,24 +532,12 @@
           "description": "单条命令的最长执行时间（毫秒）"
         }
       }
-    },
-    "viewsWelcome": [
-      {
-        "view": "ptnAgent.sessionView",
-        "when": "!ptnAgent.configured",
-        "contents": "还没有连接模型服务。\n填写 API 地址、API Key 并选择模型后就可以开始。\n[配置模型服务](command:ptnAgent.settings)"
-      },
-      {
-        "view": "ptnAgent.sessionView",
-        "when": "ptnAgent.configured",
-        "contents": "今天想一起完成什么？\n[打开对话窗口](command:ptnAgent.openChat)\n[输入任务…](command:ptnAgent.ask)"
-      }
-    ]
+    }
   },
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package",
+    "package": "npm run compile && node scripts/smoke.js --runtime && vsce package",
     "lint": "tsc --noEmit -p ./",
     "check": "node scripts/check-policy.js && node scripts/check-commands.js && node scripts/check-session.js && node scripts/check-platform.js && node scripts/check-undo.js && node scripts/check-models.js && node scripts/check-pi-custom-provider.js && node scripts/check-agent.js && node scripts/check-chat.js && node scripts/check-tui.js && node scripts/smoke.js"
   },

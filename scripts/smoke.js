@@ -1,4 +1,4 @@
-require('./source-loader');
+if (!process.argv.includes('--runtime')) require('./source-loader');
 const Module = require('module');
 const path = require('path');
 const manifest = require('../package.json');
@@ -10,6 +10,11 @@ const treeViews = [];
 const terminals = [];
 const linkProviders = [];
 const webviews = [];
+const chatParticipants = [];
+const executedCommands = [];
+const settingsInputs = [];
+const settingsMenus = [];
+const configuration = {};
 
 function disposable(fn) {
   return { dispose: fn || (() => {}) };
@@ -84,7 +89,7 @@ const stub = {
       const declaration = Object.values(manifest.contributes.views).flat().find((view) => view.id === id);
       if (!declaration || declaration.type === 'webview') throw new Error('No view is registered with id: ' + id);
       treeViews.push({ id, options });
-      return { description: undefined, badge: undefined, dispose: () => {} };
+      return { description: undefined, badge: undefined, onDidChangeVisibility: () => disposable(), dispose: () => {} };
     },
     createTerminal: (options) => {
       const terminal = {
@@ -111,8 +116,8 @@ const stub = {
     showInformationMessage: async () => undefined,
     showWarningMessage: async () => undefined,
     showErrorMessage: async () => undefined,
-    showInputBox: async () => undefined,
-    showQuickPick: async () => undefined,
+    showInputBox: async (options) => { settingsInputs.push(options); return undefined; },
+    showQuickPick: async (items, options) => { settingsMenus.push({ items, options }); return undefined; },
     withProgress: async (_o, task) => task(),
     onDidChangeTextEditorSelection: () => disposable(),
     onDidChangeActiveTextEditor: () => disposable(),
@@ -121,7 +126,7 @@ const stub = {
   },
   workspace: {
     getConfiguration: () => ({
-      get: (key, fallback) => fallback,
+      get: (key, fallback) => configuration[key] ?? fallback,
       update: async () => {}
     }),
     registerTextDocumentContentProvider: () => disposable(),
@@ -140,7 +145,18 @@ const stub = {
       commands.set(id, handler);
       return disposable();
     },
-    executeCommand: async () => undefined
+    executeCommand: async (...args) => {
+      executedCommands.push(args);
+      if (commands.has(args[0])) return commands.get(args[0])(...args.slice(1));
+      return undefined;
+    }
+  },
+  chat: {
+    createChatParticipant: (id, handler) => {
+      const participant = { id, handler, dispose: () => {} };
+      chatParticipants.push(participant);
+      return participant;
+    }
   },
   extensions: { getExtension: () => undefined },
   languages: { getDiagnostics: () => [] },
@@ -240,48 +256,105 @@ async function main() {
       process.exitCode = 1;
     }
   };
-  check('注册了原生树视图且没有 Webview', treeViews.length === 1 && treeViews[0].id === 'ptnAgent.sessionView' && webviews.length === 0);
+  check('分别注册完整聊天与原生兼容视图', treeViews.length === 1 && treeViews[0].id === 'ptnAgent.nativeSessionView' && webviews.length === 1 && webviews[0].id === 'ptnAgent.sessionView');
   const navigation = manifest.contributes.menus['view/title'].filter((item) => item.group.startsWith('navigation') && !item.when.includes('ptnAgent.busy'));
-  check('侧栏常驻操作只有新建、历史、设置', navigation.map((item) => item.command).join() === 'ptnAgent.newSession,ptnAgent.history,ptnAgent.settings');
-  check('原生欢迎页存在', manifest.contributes.viewsWelcome.every((entry) => entry.view === treeViews[0].id));
-  const titleButtons = manifest.contributes.menus['editor/title'] || [];
+  const sidebarNavigation = navigation.filter((item) => item.when.includes('view == ptnAgent.sessionView'));
+  check('侧栏常驻操作只有新建、历史、设置', sidebarNavigation.map((item) => item.command).join() === 'ptnAgent.newSession,ptnAgent.history,ptnAgent.settings');
+  check('清单与 Webview 注册方式一致', manifest.contributes.views.ptnAgent[0].type === 'webview');
+  check('不再注册宿主 Chat 参与者', chatParticipants.length === 0 && !manifest.contributes.chatParticipants);
+  const titleButtons = manifest.contributes.menus['view/title'] || [];
   check(
-    '对话标签页标题栏有新建、历史、设置（与原型顶部图标一致）',
-    titleButtons.filter((item) => !item.when.includes('ptnAgent.busy')).map((item) => item.command).join() === 'ptnAgent.newSession,ptnAgent.history,ptnAgent.settings' &&
-      titleButtons.every((item) => item.when.includes('ptnAgent.chatActive') && item.when.includes('resourceScheme == vscode-terminal'))
+    'Agent 面板标题栏有输入、新建、历史、设置',
+    titleButtons.filter((item) => item.group.startsWith('navigation') && item.when.includes('view == ptnAgent.sessionView') && !item.when.includes('ptnAgent.busy')).map((item) => item.command).join() === 'ptnAgent.newSession,ptnAgent.history,ptnAgent.settings' &&
+      titleButtons.some((item) => item.command === 'ptnAgent.ask' && item.when.includes('view == ptnAgent.sessionView'))
   );
-  check('注册了终端链接（文件:行号）', linkProviders.length === 1);
+  check('没有终端标题菜单或终端链接', linkProviders.length === 0 && !manifest.contributes.menus['editor/title']);
   check('激活时不创建对话终端', terminals.length === 0);
 
   await commands.get('ptnAgent.openChat')();
-  const term = terminals[0];
-  check('打开对话会创建一个终端标签页', terminals.length === 1 && term.name === 'AI Agent' && term.options.pty && term.shown === 1);
-  check('对话终端默认放在编辑器右侧', term && term.options.location && term.options.location.viewColumn === stub.ViewColumn.Beside);
-  let screen = '';
-  term.options.pty.onDidWrite((d) => (screen += d));
-  term.options.pty.open({ columns: 80, rows: 24 });
-  await new Promise((r) => setTimeout(r, 50));
-  const plain = screen.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
-  check('对话终端打开后绘制了标题行与欢迎页', /✦ AI Agent/.test(plain) && /\/settings/.test(plain) && /(有什么想一起完成的|先连接模型服务)/.test(plain));
-  const headerLinks = linkProviders[0].provideTerminalLinks({ terminal: term, line: '✦ AI Agent     /new 新建 · /history 历史 · /settings 设置' });
-  check('标题行的新建 / 历史 / 设置可以点击', headerLinks.map((l) => l.action && l.action.type).join() === 'newSession,openHistory,openSettings');
-  check(
-    '链接只作用于对话终端',
-    linkProviders[0].provideTerminalLinks({ terminal: term, line: '见 src/a.ts:12' }).length === 1 &&
-      linkProviders[0].provideTerminalLinks({ terminal: {}, line: '见 src/a.ts:12' }).length === 0
-  );
+  check('打开对话聚焦 Agent 侧栏', terminals.length === 0 && executedCommands.some((args) => args[0] === 'workbench.view.extension.ptnAgent'));
   await commands.get('ptnAgent.openTerminalChat')();
-  check('再次打开复用同一个终端', terminals.length === 1 && term.shown === 2);
-  term.options.pty.handleInput('关闭前的草稿');
-  term.options.pty.close();
-  await commands.get('ptnAgent.openChat')();
-  const reopened = terminals[1];
-  let restoredScreen = '';
-  reopened.options.pty.onDidWrite((data) => { restoredScreen += data; });
-  reopened.options.pty.open({ columns: 80, rows: 24 });
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  check('关闭后重新打开原生终端会恢复草稿', restoredScreen.includes('关闭前的草稿'));
-  reopened.options.pty.close();
+  check('兼容旧入口仍复用同一个 Agent 侧栏', terminals.length === 0 && executedCommands.filter((args) => args[0] === 'workbench.view.extension.ptnAgent').length >= 2);
+  check('聊天入口不调用 Copilot Chat 命令', !executedCommands.some((args) => /^workbench\.(action\.chat\.|panel\.chat)/.test(args[0])));
+
+  const messages = [];
+  let receive;
+  const view = {
+    webview: {
+      cspSource: 'vscode-webview:',
+      asWebviewUri: (uri) => uri,
+      onDidReceiveMessage: (handler) => { receive = handler; return disposable(); },
+      postMessage: (message) => { messages.push(message); return Promise.resolve(true); }
+    },
+    visible: true,
+    show: () => {},
+    onDidChangeVisibility: () => disposable(),
+    onDidDispose: () => disposable()
+  };
+  webviews[0].provider.resolveWebviewView(view);
+  check('默认就有底部输入框与会话区', view.webview.html.includes('id="composer"') && view.webview.html.includes('id="sessions"'));
+  check('启用本地脚本并限定资源目录', view.webview.options.enableScripts && view.webview.options.localResourceRoots.length === 1);
+  await receive({ type: 'ready' });
+  check('侧栏就绪后同步状态、历史与会话列表', ['state', 'history', 'sessions'].every((type) => messages.some((message) => message.type === type)));
+  await commands.get('ptnAgent.settings')();
+  check('标题栏设置未配置时直接打开 API 地址引导', settingsInputs.length === 1 && /连接模型服务/.test(settingsInputs[0].title));
+  configuration.baseUrl = 'https://model.invalid/v1';
+  configuration.model = 'test-model';
+  await commands.get('ptnAgent.settings')();
+  check('标题栏设置已配置时直接打开配置菜单', settingsMenus.length === 1 && settingsMenus[0].items.some((item) => item.id === 'baseUrl'));
+  await receive({ type: 'command', action: 'settings' });
+  check('侧栏内设置操作到达同一个配置菜单', settingsMenus.length === 2);
+  const { NativeChatSurface } = require(path.join(__dirname, '..', 'out', 'ui', 'nativeChat.js'));
+  const legacySurface = new NativeChatSurface(fakeContext.extensionUri);
+  let legacySettings = 0;
+  legacySurface.onSettings = () => { legacySettings++; };
+  legacySurface.showSettings();
+  check('旧原生界面的设置入口直接调用设置回调', legacySettings === 1);
+  check('设置完整操作链不调用 Copilot Chat', !executedCommands.some((args) => /^workbench\.(action\.chat\.|panel\.chat)/.test(args[0])));
+  const beforeUnknown = executedCommands.length;
+  await receive({ type: 'command', action: 'arbitrary-command' });
+  check('拒绝未列入白名单的界面命令', executedCommands.length === beforeUnknown);
+
+  const chatView = webviews[0].provider;
+  const nativeTree = treeViews[0].options.treeDataProvider;
+  configuration.baseUrl = '';
+  configuration.model = '';
+  // 捕获真实的就绪超时回调，无需等待 10 秒，也不执行模型请求。
+  const originalSetTimeout = global.setTimeout;
+  let readyTimeout;
+  try {
+    global.setTimeout = (callback, delay, ...args) => {
+      const handle = originalSetTimeout(callback, delay, ...args);
+      if (delay === 10000) readyTimeout = () => { clearTimeout(handle); callback(); };
+      return handle;
+    };
+    await commands.get('ptnAgent.retryChatView')();
+  } finally {
+    global.setTimeout = originalSetTimeout;
+  }
+  check('打开完整界面启动就绪超时检测', typeof readyTimeout === 'function');
+  readyTimeout();
+  await new Promise((resolve) => setImmediate(resolve));
+  check('界面未就绪时自动切换原生视图', executedCommands.some((args) => args[0] === 'setContext' && args[1] === 'ptnAgent.nativeFallback' && args[2] === true) && !chatView.canApprove);
+  check('原生兼容视图始终提供输入任务入口', nativeTree.getChildren().some((node) => node.command === 'ptnAgent.ask'));
+  chatView.post({ type: 'user', text: '兼容视图任务' });
+  chatView.post({ type: 'textDelta', text: '兼容视图回复' });
+  chatView.post({ type: 'assistantEnd', text: '兼容视图回复' });
+  const nativeTurn = nativeTree.getChildren().find((node) => node.kind === 'turn');
+  check('兼容视图显示任务和流式回复', nativeTurn && nativeTree.getChildren(nativeTurn).some((node) => node.kind === 'reply' && node.turn.reply === '兼容视图回复'));
+  const menuCount = settingsInputs.length;
+  await commands.get('ptnAgent.ask')();
+  check('兼容视图未配置时打开自有模型引导', settingsInputs.length === menuCount + 1);
+  await commands.get('ptnAgent.retryChatView')();
+  await receive({ type: 'ready' });
+  check('重试后可恢复完整聊天界面', chatView.canApprove && messages.some((msg) => msg.type === 'requestReady'));
+  await commands.get('ptnAgent.useNativeChat')();
+  check('命令面板可立即切换原生兼容视图', !chatView.canApprove);
+  await commands.get('ptnAgent.retryChatView')();
+  await receive({ type: 'ready' });
+  check('兼容和恢复流程不调用 Copilot Chat', !executedCommands.some((args) => /^workbench\.(action\.chat\.|panel\.chat)/.test(args[0])));
+  const inputKey = manifest.contributes.keybindings.find((entry) => entry.command === 'ptnAgent.openChat');
+  check('SXPT 聊天使用独立快捷键', inputKey.key === 'ctrl+alt+shift+i');
 
   if (!process.exitCode) {
     console.log('smoke test passed');

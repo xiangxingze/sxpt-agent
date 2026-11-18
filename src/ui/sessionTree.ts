@@ -1,11 +1,12 @@
 import * as vscode from 'vscode';
+import type { ChatSurface } from '../chatController';
 import { APPROVAL_MODE_LABELS, ApprovalMode } from '../config';
 
 /**
- * 侧栏的原生树视图：待确认的操作、任务计划、每一轮对话的工具步骤 / 回答 / 改动文件。
- * 会话为空时返回空列表，由 package.json 里的 viewsWelcome 显示原生欢迎页。
+ * 原生 Agent 面板。
  *
- * 数据来自 ChatController 广播的同一套消息，与终端里的对话界面保持一致。
+ * 这是原生 Chat 不可用时的兼容视图，也作为状态镜像保留。
+ * 它不创建 Terminal，也不依赖 Webview；支持在同一个 TreeView 内切换对话、历史和设置。
  */
 
 interface StepNode {
@@ -62,7 +63,62 @@ interface ErrorNode {
   message: string;
 }
 
-type Node = StepNode | TurnNode | ApprovalNode | PlanNode | PlanStepNode | ReplyNode | FileNode | ErrorNode;
+interface PageNode {
+  kind: 'page';
+  page: 'history' | 'settings';
+}
+
+interface SessionNode {
+  kind: 'session';
+  id: string;
+  title: string;
+  updatedAt: number;
+  active: boolean;
+}
+
+interface SettingNode {
+  kind: 'setting';
+  id: string;
+  label: string;
+  description: string;
+  command: string;
+}
+
+interface EmptyNode {
+  kind: 'empty';
+  label: string;
+  description: string;
+  command?: string;
+}
+
+interface NoticeNode {
+  kind: 'notice';
+  text: string;
+  level: 'info' | 'warn';
+}
+
+type Node =
+  | StepNode
+  | TurnNode
+  | ApprovalNode
+  | PlanNode
+  | PlanStepNode
+  | ReplyNode
+  | FileNode
+  | ErrorNode
+  | PageNode
+  | SessionNode
+  | SettingNode
+  | EmptyNode
+  | NoticeNode;
+
+type PanelMode = 'chat' | 'history' | 'settings';
+
+interface SessionSummary {
+  id: string;
+  title: string;
+  updatedAt: number;
+}
 
 const TOOL_ICONS: Record<string, string> = {
   read: 'file',
@@ -87,8 +143,10 @@ function firstLine(text: string, max = 80): string {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
 
-export class SessionTree implements vscode.TreeDataProvider<Node> {
+export class SessionTree implements vscode.TreeDataProvider<Node>, ChatSurface {
   public static readonly viewId = 'ptnAgent.sessionView';
+
+  constructor(private readonly registeredViewId = SessionTree.viewId) {}
 
   private readonly changed = new vscode.EventEmitter<Node | undefined | void>();
   readonly onDidChangeTreeData = this.changed.event;
@@ -105,22 +163,69 @@ export class SessionTree implements vscode.TreeDataProvider<Node> {
   private mode: ApprovalMode = 'ask';
   private configured = false;
   private busy = false;
+  private baseUrl = '';
+  private contextLabel = '';
+  private sessions: SessionSummary[] = [];
+  private activeSessionId = '';
+  private panelMode: PanelMode = 'chat';
+  private notice?: NoticeNode;
 
-  register(context: vscode.ExtensionContext): void {
-    this.view = vscode.window.createTreeView(SessionTree.viewId, { treeDataProvider: this, showCollapseAll: true });
+  /** TreeView 内的审批项可直接使用右侧原生菜单完成审批。 */
+  readonly canApprove = true;
+
+  register(context: vscode.ExtensionContext, onVisible?: () => void): void {
+    this.view = vscode.window.createTreeView(this.registeredViewId, {
+      treeDataProvider: this,
+      showCollapseAll: true
+    });
     context.subscriptions.push(this.view, this.changed, {
       dispose: () => {
-        if (this.timer) {
-          clearTimeout(this.timer);
-        }
+        if (this.timer) clearTimeout(this.timer);
       }
     });
+    if (onVisible) {
+      context.subscriptions.push(
+        this.view.onDidChangeVisibility((event) => {
+          if (event.visible) onVisible();
+        })
+      );
+    }
+    this.updateChrome();
+  }
+
+  /** ChatSurface：控制器发出的消息直接进入这个唯一面板。 */
+  post(message: unknown): void {
+    this.receive(message);
+  }
+
+  async reveal(): Promise<void> {
+    this.panelMode = 'chat';
+    this.refresh(0);
+    // 打开活动栏中的 Agent 容器，不创建编辑器标签页或集成终端。
+    await vscode.commands.executeCommand('workbench.view.extension.ptnAgent');
+  }
+
+  showHistory(): void {
+    this.panelMode = 'history';
+    this.refresh(0);
+  }
+
+  showSettings(): void {
+    this.panelMode = 'settings';
+    this.refresh(0);
+  }
+
+  docColumn(): vscode.ViewColumn {
+    return vscode.ViewColumn.Beside;
+  }
+
+  draft(): string | undefined {
+    // Native InputBox 不会在面板里留下未提交的草稿。
+    return undefined;
   }
 
   private refresh(delay = 120): void {
-    if (this.timer) {
-      return;
-    }
+    if (this.timer) return;
     this.timer = setTimeout(() => {
       this.timer = undefined;
       this.changed.fire();
@@ -128,12 +233,21 @@ export class SessionTree implements vscode.TreeDataProvider<Node> {
     }, delay);
   }
 
-  /** 视图标题旁的说明、徽标，以及欢迎页 / 标题栏按钮用到的上下文键 */
   private updateChrome(): void {
     if (this.view) {
-      this.view.description = this.configured
-        ? `${this.model} · ${APPROVAL_MODE_LABELS[this.mode] ?? this.mode}`
-        : '未配置模型';
+      const pageLabel = this.panelMode === 'history' ? '历史会话' : this.panelMode === 'settings' ? '设置' : '';
+      this.view.description =
+        pageLabel || (this.configured ? `${this.model} · ${APPROVAL_MODE_LABELS[this.mode] ?? this.mode}` : '未配置模型');
+      this.view.message =
+        this.panelMode !== 'chat'
+          ? undefined
+          : this.turns.length === 0
+            ? this.configured
+              ? '单击“输入任务…”开始对话，或使用右上角的新建、历史和设置。'
+              : '请先打开设置连接模型服务。'
+            : this.contextLabel
+              ? `当前上下文：${this.contextLabel}`
+              : undefined;
       this.view.badge =
         this.approvals.length > 0
           ? { value: this.approvals.length, tooltip: `${this.approvals.length} 项操作等待确认` }
@@ -156,29 +270,21 @@ export class SessionTree implements vscode.TreeDataProvider<Node> {
       running
     };
     this.turns.push(turn);
-    while (this.turns.length > MAX_TURNS) {
-      this.turns.shift();
-    }
+    while (this.turns.length > MAX_TURNS) this.turns.shift();
     return turn;
   }
 
   receive(msg: any): void {
     switch (msg?.type) {
       case 'state':
-        if (msg.configured !== undefined) {
-          this.configured = !!msg.configured;
-        }
-        if (msg.model !== undefined) {
-          this.model = String(msg.model || '');
-        }
-        if (msg.mode) {
-          this.mode = msg.mode;
-        }
+        if (msg.configured !== undefined) this.configured = !!msg.configured;
+        if (msg.model !== undefined) this.model = String(msg.model || '');
+        if (msg.mode) this.mode = msg.mode;
+        if (msg.baseUrl !== undefined) this.baseUrl = String(msg.baseUrl || '');
+        if (msg.contextLabel !== undefined) this.contextLabel = String(msg.contextLabel || '');
         if (msg.busy !== undefined) {
           this.busy = !!msg.busy;
-          if (!this.busy && this.current) {
-            this.current.running = false;
-          }
+          if (!this.busy && this.current) this.current.running = false;
         }
         break;
       case 'history': {
@@ -187,22 +293,32 @@ export class SessionTree implements vscode.TreeDataProvider<Node> {
         this.current = undefined;
         let turn: TurnNode | undefined;
         for (const m of messages) {
-          if (m.role === 'user') {
-            turn = this.startTurn(m.content, false);
-          } else if (m.role === 'assistant' && turn) {
-            turn.reply = m.content;
-          }
+          if (m.role === 'user') turn = this.startTurn(m.content, false);
+          else if (m.role === 'assistant' && turn) turn.reply = m.content;
         }
         break;
       }
+      case 'sessions':
+        this.activeSessionId = String(msg.activeId ?? '');
+        this.sessions = (Array.isArray(msg.sessions) ? msg.sessions : []).map((session: any) => ({
+          id: String(session.id ?? ''),
+          title: String(session.title || '新会话'),
+          updatedAt: Number(session.updatedAt) || 0
+        }));
+        break;
+      case 'context':
+        this.contextLabel = String(msg.label ?? '');
+        break;
+      case 'notice':
+        this.notice = { kind: 'notice', text: String(msg.text ?? ''), level: msg.level === 'warn' ? 'warn' : 'info' };
+        break;
       case 'user':
+        this.notice = undefined;
         this.plan = [];
         this.current = this.startTurn(String(msg.text ?? ''), true);
         break;
       case 'textDelta':
-        if (this.current) {
-          this.current.reply += String(msg.text ?? '');
-        }
+        if (this.current) this.current.reply += String(msg.text ?? '');
         this.refresh(400);
         return;
       case 'textReset':
@@ -255,9 +371,7 @@ export class SessionTree implements vscode.TreeDataProvider<Node> {
         this.approvals = this.approvals.filter((a) => a.id !== String(msg.id));
         break;
       case 'changes':
-        if (this.current) {
-          this.current.files = Array.isArray(msg.files) ? msg.files.slice(0, 50) : [];
-        }
+        if (this.current) this.current.files = Array.isArray(msg.files) ? msg.files.slice(0, 50) : [];
         break;
       case 'assistantEnd':
         if (this.current) {
@@ -273,11 +387,11 @@ export class SessionTree implements vscode.TreeDataProvider<Node> {
         }
         break;
       case 'error':
-        if (this.current) {
-          this.current.error = String(msg.message ?? '');
-        }
+        if (this.current) this.current.error = String(msg.message ?? '');
         break;
       case 'cleared':
+        this.panelMode = 'chat';
+        this.notice = undefined;
         this.turns = [];
         this.approvals = [];
         this.plan = [];
@@ -289,27 +403,67 @@ export class SessionTree implements vscode.TreeDataProvider<Node> {
     this.refresh();
   }
 
+  private settingsNodes(): SettingNode[] {
+    if (!this.configured) {
+      return [
+        {
+          kind: 'setting',
+          id: 'setup',
+          label: '连接模型服务',
+          description: '配置 API 地址、API Key 和模型',
+          command: 'ptnAgent.setup'
+        }
+      ];
+    }
+    return [
+      { kind: 'setting', id: 'baseUrl', label: 'API 地址', description: this.baseUrl || '未填写', command: 'ptnAgent.editBaseUrl' },
+      { kind: 'setting', id: 'apiKey', label: 'API Key', description: '使用 SecretStorage 安全保存', command: 'ptnAgent.editApiKey' },
+      { kind: 'setting', id: 'model', label: '模型', description: this.model || '未选择', command: 'ptnAgent.pickModel' },
+      {
+        kind: 'setting',
+        id: 'mode',
+        label: '操作确认',
+        description: APPROVAL_MODE_LABELS[this.mode] ?? this.mode,
+        command: 'ptnAgent.pickMode'
+      },
+      { kind: 'setting', id: 'test', label: '测试连接', description: '使用当前地址、Key 和模型测试', command: 'ptnAgent.testConnection' },
+      { kind: 'setting', id: 'more', label: '更多设置', description: '打开完整的原生设置菜单', command: 'ptnAgent.settingsMenu' }
+    ];
+  }
+
   getChildren(element?: Node): Node[] {
     if (!element) {
-      const roots: Node[] = [...this.approvals];
-      if (this.plan.length > 0) {
-        roots.push({ kind: 'plan' });
+      if (this.panelMode === 'history') {
+        return [
+          { kind: 'page', page: 'history' },
+          ...(this.sessions.length
+            ? this.sessions.map((session) => ({
+                kind: 'session' as const,
+                id: session.id,
+                title: session.title,
+                updatedAt: session.updatedAt,
+                active: session.id === this.activeSessionId
+              }))
+            : [{ kind: 'empty' as const, label: '暂无历史会话', description: '开始对话后会自动保存' }])
+        ];
       }
-      // 最新的对话排在最上面
+      if (this.panelMode === 'settings') return [{ kind: 'page', page: 'settings' }, ...this.settingsNodes()];
+
+      // 空会话交给 viewsWelcome 渲染，用户通过欢迎页或视图标题按钮打开原生 InputBox。
+      const roots: Node[] = [...this.approvals];
+      if (this.registeredViewId !== SessionTree.viewId) {
+        roots.unshift({ kind: 'empty', label: '输入任务…', description: '使用当前配置的模型，无需 Copilot 登录', command: 'ptnAgent.ask' });
+      }
+      if (this.notice) roots.push(this.notice);
+      if (this.plan.length > 0) roots.push({ kind: 'plan' });
       roots.push(...[...this.turns].reverse());
       return roots;
     }
-    if (element.kind === 'plan') {
-      return this.plan;
-    }
+    if (element.kind === 'plan') return this.plan;
     if (element.kind === 'turn') {
       const children: Node[] = [...element.steps];
-      if (element.reply.trim()) {
-        children.push({ kind: 'reply', turn: element });
-      }
-      if (element.error) {
-        children.push({ kind: 'error', message: element.error });
-      }
+      if (element.reply.trim()) children.push({ kind: 'reply', turn: element });
+      if (element.error) children.push({ kind: 'error', message: element.error });
       children.push(...element.files.map((path) => ({ kind: 'file' as const, path })));
       return children;
     }
@@ -318,10 +472,47 @@ export class SessionTree implements vscode.TreeDataProvider<Node> {
 
   getTreeItem(node: Node): vscode.TreeItem {
     switch (node.kind) {
+      case 'page': {
+        const item = new vscode.TreeItem(node.page === 'history' ? '‹ 返回当前会话' : '‹ 返回对话', vscode.TreeItemCollapsibleState.None);
+        item.iconPath = new vscode.ThemeIcon('arrow-left');
+        item.command = { command: 'ptnAgent.openChat', title: '返回当前会话' };
+        return item;
+      }
+      case 'session': {
+        const item = new vscode.TreeItem(node.title || '新会话', vscode.TreeItemCollapsibleState.None);
+        item.description = node.active ? '当前会话' : node.updatedAt ? new Date(node.updatedAt).toLocaleString() : '';
+        item.tooltip = node.title;
+        item.iconPath = new vscode.ThemeIcon(node.active ? 'comment-discussion' : 'history');
+        item.command = { command: 'ptnAgent.selectSession', title: '打开会话', arguments: [node.id] };
+        return item;
+      }
+      case 'setting': {
+        const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.None);
+        item.description = node.description;
+        item.tooltip = `${node.label}\n${node.description}`;
+        item.iconPath = new vscode.ThemeIcon(
+          node.id === 'model' ? 'sparkle' : node.id === 'mode' ? 'shield' : node.id === 'test' ? 'plug' : 'gear'
+        );
+        item.command = { command: node.command, title: node.label };
+        return item;
+      }
+      case 'empty': {
+        const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.None);
+        item.description = node.description;
+        item.iconPath = new vscode.ThemeIcon(node.command === 'ptnAgent.ask' ? 'edit' : 'history');
+        if (node.command) item.command = { command: node.command, title: node.label };
+        return item;
+      }
+      case 'notice': {
+        const item = new vscode.TreeItem(node.text, vscode.TreeItemCollapsibleState.None);
+        item.iconPath = new vscode.ThemeIcon(node.level === 'warn' ? 'warning' : 'info');
+        item.tooltip = node.text;
+        return item;
+      }
       case 'approval': {
         const item = new vscode.TreeItem(node.title, vscode.TreeItemCollapsibleState.None);
         item.description = `等待确认 · ${node.detail}`;
-        item.tooltip = `${node.title}\n${node.detail}\n\n在对话窗口中按 1 / 2 / 3 选择，或使用右侧的按钮。`;
+        item.tooltip = `${node.title}\n${node.detail}\n\n使用右侧的允许或拒绝按钮。`;
         item.iconPath = new vscode.ThemeIcon('warning', new vscode.ThemeColor('editorWarning.foreground'));
         item.contextValue = node.approvalKind === 'bash' ? 'approvalCommand' : 'approvalEdit';
         item.command = { command: 'ptnAgent.openChat', title: '打开对话' };
@@ -356,7 +547,6 @@ export class SessionTree implements vscode.TreeDataProvider<Node> {
               : vscode.TreeItemCollapsibleState.Collapsed
             : vscode.TreeItemCollapsibleState.None
         );
-        // 展开状态按节点记忆：最新一轮与历史轮次使用不同的 id，新一轮开始后旧的自动折叠
         item.id = `turn-${node.id}-${isLatest ? 'latest' : 'past'}`;
         item.description = node.running ? '进行中…' : node.meta;
         item.iconPath = new vscode.ThemeIcon(node.running ? 'sync~spin' : node.error ? 'error' : 'comment');
@@ -380,7 +570,6 @@ export class SessionTree implements vscode.TreeDataProvider<Node> {
         item.iconPath = new vscode.ThemeIcon('sparkle');
         item.description = node.turn.running ? '输出中…' : '';
         const preview = node.turn.reply.length > 4000 ? `${node.turn.reply.slice(0, 4000)}\n\n…` : node.turn.reply;
-        // 悬停提示由 VS Code 原生渲染 Markdown；不信任其中的命令链接
         const tip = new vscode.MarkdownString(preview);
         tip.isTrusted = false;
         item.tooltip = tip;

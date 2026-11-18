@@ -155,11 +155,6 @@ export class SettingsController {
           label: '$(terminal) 免确认的命令',
           description: cfg.allowedCommands.length ? `${cfg.allowedCommands.length} 条前缀` : '无'
         },
-        {
-          id: 'location',
-          label: '$(layout-sidebar-right) 对话窗口位置',
-          description: cfg.chatLocation === 'panel' ? '底部面板' : '编辑器右侧'
-        },
         sep('高级'),
         { id: 'contextWindow', label: '$(symbol-numeric) 上下文窗口', description: `${cfg.contextWindow} token` },
         { id: 'maxOutput', label: '$(symbol-numeric) 单次回复最大输出', description: `${cfg.maxOutputTokens} token` },
@@ -203,9 +198,6 @@ export class SettingsController {
           break;
         case 'allowed':
           await this.editAllowedCommands();
-          break;
-        case 'location':
-          await this.pickLocation();
           break;
         case 'contextWindow':
           await this.editNumber('contextWindow', '上下文窗口（token）', cfg.contextWindow, validateContextWindowInput);
@@ -430,33 +422,6 @@ export class SettingsController {
     }
     await this.update('approvalMode', mode);
     await this.onChanged();
-  }
-
-  private async pickLocation(): Promise<void> {
-    const current = readConfig().chatLocation;
-    const picked = await this.pick(
-      [
-        {
-          id: 'loc',
-          value: 'beside',
-          label: '编辑器右侧',
-          description: current === 'beside' ? '当前' : '',
-          detail: '对话作为一个标签页显示在代码右边'
-        },
-        {
-          id: 'loc',
-          value: 'panel',
-          label: '底部面板',
-          description: current === 'panel' ? '当前' : '',
-          detail: '对话显示在底部的终端面板里'
-        }
-      ],
-      { title: '对话窗口位置', placeHolder: '下次打开对话窗口时生效' }
-    );
-    if (picked?.value) {
-      await this.update('chatLocation', picked.value);
-      await this.onChanged();
-    }
   }
 
   private async editAllowedCommands(): Promise<void> {

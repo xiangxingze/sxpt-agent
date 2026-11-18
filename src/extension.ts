@@ -5,8 +5,7 @@ import { collectContext, contextToPrompt } from './contextCollector';
 import { ChangeTracker } from './changeTracker';
 import { DiffPreview } from './diffPreview';
 import { ChatController } from './chatController';
-import { ChatTerminal } from './ui/chatTerminal';
-import { SessionTree } from './ui/sessionTree';
+import { ChatView } from './ui/chatView';
 import { PlatformClient, courseContextToPrompt } from './platform/client';
 import { getProjectOutline } from './project/outline';
 import { piSdkLoadError, probePiSdk } from './agent/piAgent';
@@ -27,22 +26,18 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const controller = new ChatController(secrets, tracker, diffs, platform, output, statusBar, context);
 
-  const terminal = new ChatTerminal({
-    onMessage: (message) => void controller.onMessage(message),
-    cwd: () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
-    location: () => readConfig().chatLocation
-  });
-  controller.attachSurface(terminal);
-  const tree = new SessionTree();
-  tree.register(context);
-  controller.addObserver((message) => tree.receive(message));
-  context.subscriptions.push(terminal, { dispose: () => controller.dispose() });
+  const chatView = new ChatView(context.extensionUri, controller);
+  controller.attachSurface(chatView);
+  chatView.register(context);
+  context.subscriptions.push({ dispose: () => controller.dispose() });
 
   const register = (id: string, handler: (...args: any[]) => any) =>
     context.subscriptions.push(vscode.commands.registerCommand(id, handler));
 
   register('ptnAgent.openChat', () => controller.reveal());
-  // 兼容已保存的命令引用，原生终端现在就是默认对话入口。
+  register('ptnAgent.useNativeChat', () => chatView.useNativeChat());
+  register('ptnAgent.retryChatView', () => chatView.retryChatView());
+  // 兼容已保存的命令引用，所有入口复用活动栏聊天侧栏。
   register('ptnAgent.openTerminalChat', () => controller.reveal());
   register('ptnAgent.ask', () => controller.ask());
   register('ptnAgent.stop', () => controller.stop());
@@ -54,11 +49,17 @@ export function activate(context: vscode.ExtensionContext): void {
   register('ptnAgent.explainProject', () => controller.runQuickAction('project'));
   register('ptnAgent.newSession', () => controller.newSession());
   register('ptnAgent.history', () => controller.openHistory());
+  register('ptnAgent.selectSession', (id?: string) => controller.onMessage({ type: 'selectSession', id }));
   register('ptnAgent.undoLastPatch', () => controller.undo());
   register('ptnAgent.runTests', () => controller.runTests());
   register('ptnAgent.runCommand', () => controller.promptRunCommand());
 
   register('ptnAgent.settings', () => controller.openSettings());
+  register('ptnAgent.setup', () => controller.setupSettings());
+  register('ptnAgent.editBaseUrl', () => controller.editBaseUrl());
+  register('ptnAgent.editApiKey', () => controller.editApiKey());
+  register('ptnAgent.testConnection', () => controller.testConnection());
+  register('ptnAgent.settingsMenu', () => controller.openSettingsMenu());
   register('ptnAgent.pickModel', () => controller.pickModel());
   register('ptnAgent.pickMode', () => controller.pickApprovalMode());
 
@@ -83,7 +84,7 @@ export function activate(context: vscode.ExtensionContext): void {
       content: `# 项目结构摘要\n\n${text}\n`,
       language: 'markdown'
     });
-    await vscode.window.showTextDocument(doc, { preview: true, viewColumn: terminal.docColumn() });
+    await vscode.window.showTextDocument(doc, { preview: true, viewColumn: chatView.docColumn() });
   });
 
   register('ptnAgent.showContext', async () => {
@@ -111,7 +112,7 @@ export function activate(context: vscode.ExtensionContext): void {
       content: `${sections.join('\n\n')}\n`,
       language: 'markdown'
     });
-    await vscode.window.showTextDocument(doc, { preview: true, viewColumn: terminal.docColumn() });
+    await vscode.window.showTextDocument(doc, { preview: true, viewColumn: chatView.docColumn() });
   });
 
   register('ptnAgent.gotoProblem', async () => {
@@ -159,7 +160,7 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
     const doc = await vscode.workspace.openTextDocument(picked.uri);
-    const editor = await vscode.window.showTextDocument(doc, { preview: true, viewColumn: terminal.docColumn() });
+    const editor = await vscode.window.showTextDocument(doc, { preview: true, viewColumn: chatView.docColumn() });
     editor.selection = new vscode.Selection(picked.range.start, picked.range.end);
     editor.revealRange(picked.range, vscode.TextEditorRevealType.InCenter);
   });

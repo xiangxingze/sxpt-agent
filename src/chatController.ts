@@ -56,16 +56,28 @@ interface PendingApproval {
 }
 
 /**
- * 对话界面（由 ChatTerminal 实现）。控制器只依赖这个接口，不关心界面如何绘制。
+ * 对话界面（当前由活动栏里的原生 Agent 面板实现）。控制器只依赖这个接口，
+ * 不关心界面如何绘制。
  *
- * 约定：界面发出 `ready` 时，控制器会在同一次调用里同步回送 `state` 和 `history`，
- * 界面据此把「打开前收到的消息」排在历史记录之后。
+ * 终端类界面可以发出 `ready` 请求同步状态；当前原生面板在扩展激活时由宿主主动同步。
  */
 export interface ChatSurface {
   /** 界面当前能否直接完成审批；不能时控制器改用原生弹窗 */
   readonly canApprove: boolean;
   post(message: unknown): void;
   reveal(preserveFocus?: boolean): Promise<void>;
+  /** 在同一个原生面板内切换到历史会话页 */
+  showHistory?(): void;
+  /** 在同一个原生面板内切换到设置页 */
+  showSettings?(): void;
+  /** 原生 Chat 请求开始时绑定当前响应流。 */
+  beginResponse?(response: vscode.ChatResponseStream): void;
+  /** 原生 Chat 请求结束时解除响应流。 */
+  endResponse?(): void;
+  /** 在当前原生 Chat 响应中显示设置内容。 */
+  showSettingsContent?(): void;
+  /** 清空宿主 Chat 的当前会话。 */
+  newSessionView?(): Promise<void>;
   /** 打开文件 / Diff 时使用的编辑器列，避免盖住对话窗口 */
   docColumn(): vscode.ViewColumn | undefined;
   draft?(): string | undefined;
@@ -159,6 +171,16 @@ export class ChatController {
   }
 
   async openHistory(): Promise<void> {
+    if (this.surface?.showHistory) {
+      this.postSessions();
+      this.surface.showHistory();
+      return;
+    }
+    await this.chooseHistory();
+  }
+
+  /** 在当前宿主面板上选择一个已保存的会话。 */
+  async chooseHistory(): Promise<void> {
     const sessions = this.session.history;
     if (!sessions.length) {
       void vscode.window.showInformationMessage('还没有历史会话，开始对话后会自动保存。');
@@ -407,6 +429,46 @@ export class ChatController {
     await this.handleUserText(text);
   }
 
+  /**
+   * 原生 Chat participant 的请求入口。Chat 宿主已经提供消息区和输入框，
+   * 这里只绑定响应流并复用现有 Agent 执行链。
+   */
+  async handleChatRequest(
+    text: string,
+    command: string | undefined,
+    _chatContext: vscode.ChatContext,
+    response: vscode.ChatResponseStream,
+    token: vscode.CancellationToken
+  ): Promise<vscode.ChatResult | void> {
+    this.surface?.beginResponse?.(response);
+    const cancellation = token.onCancellationRequested(() => this.stop());
+    try {
+      if (command === 'new') {
+        await this.newSession();
+        await this.surface?.newSessionView?.();
+        return;
+      }
+      if (command === 'history') {
+        await this.chooseHistory();
+        this.post({ type: 'notice', text: '已打开历史会话选择。' });
+        return;
+      }
+      if (command === 'settings') {
+        await this.openSettings();
+        return;
+      }
+
+      if (!text.trim()) {
+        this.post({ type: 'welcome' });
+        return;
+      }
+      await this.handleUserText(text);
+    } finally {
+      cancellation.dispose();
+      this.surface?.endResponse?.();
+    }
+  }
+
   /** 对话界面发来的用户操作 */
   async onMessage(msg: any): Promise<void> {
     switch (msg?.type) {
@@ -497,6 +559,7 @@ export class ChatController {
   // ---------------- 设置（原生 QuickPick / InputBox） ----------------
 
   async openSettings(): Promise<void> {
+    // 设置直接使用 QuickPick / InputBox，不能通过宿主 Chat 提交 /settings。
     const wasConfigured = isModelConfigured(readConfig());
     await this.settings.open();
     // 首次配置完成后直接打开对话窗口
@@ -511,6 +574,33 @@ export class ChatController {
 
   async pickApprovalMode(): Promise<void> {
     await this.settings.pickMode();
+  }
+
+  /** 侧栏设置页使用的原生设置动作。动作完成后保留在设置页，并刷新摘要。 */
+  async setupSettings(): Promise<void> {
+    await this.settings.setup();
+    await this.pushState();
+  }
+
+  async editBaseUrl(): Promise<void> {
+    await this.settings.editBaseUrl();
+    await this.pushState();
+  }
+
+  async editApiKey(): Promise<void> {
+    await this.settings.editApiKey();
+    await this.pushState();
+  }
+
+  async testConnection(): Promise<void> {
+    await this.settings.test();
+    await this.pushState();
+  }
+
+  /** 仍保留完整的原生设置菜单，供设置页的“更多设置”进入。 */
+  async openSettingsMenu(): Promise<void> {
+    await this.settings.open();
+    await this.pushState();
   }
 
   // ---------------- 打开文件 / 回答 ----------------
@@ -566,6 +656,7 @@ export class ChatController {
     return {
       type: 'state',
       configured: isModelConfigured(cfg),
+      baseUrl: cfg.baseUrl,
       model: cfg.model,
       models: this.settings.cachedModels(),
       mode: cfg.approvalMode,

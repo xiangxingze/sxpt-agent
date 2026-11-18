@@ -503,6 +503,7 @@ async function main() {
   // ===== 场景 6：未配置模型服务 → 原生引导，不调用模型 =====
   {
     const t = setup(0);
+    t.surface.showSettings = () => { throw new Error('设置不能通过聊天界面分流'); };
     configValues.baseUrl = '';
     configValues.model = '';
     resetUi();
@@ -516,6 +517,9 @@ async function main() {
       ui.shownInputs.length === 1 && /连接模型服务（1\/3）/.test(ui.shownInputs[0].title) && !types(t.posted).includes('assistantStart'),
       JSON.stringify(ui.shownInputs.map((i) => i.title))
     );
+    resetUi();
+    await t.send({ type: 'openSettings' });
+    expect('设置消息直接打开原生引导，不调用界面的 showSettings', ui.shownInputs.length === 1 && /连接模型服务/.test(ui.shownInputs[0].title));
   }
 
   // ===== 场景 7：原生设置（QuickPick / InputBox） =====
@@ -524,6 +528,7 @@ async function main() {
     const port = await listen(server);
     const base = `http://127.0.0.1:${port}/v1`;
     const t = setup(port, { noKey: true });
+    t.surface.showSettings = () => { throw new Error('设置不能通过聊天界面分流'); };
     configValues.baseUrl = '';
     configValues.model = '';
 
@@ -588,8 +593,6 @@ async function main() {
     expect('设置菜单：最大输出', configValues.maxOutputTokens === 4096);
     await menu(['autoContext', undefined]);
     expect('设置菜单：开关自动上下文', configValues.autoContext === false);
-    await menu(['location', 'panel', undefined]);
-    expect('设置菜单：对话窗口位置', configValues.chatLocation === 'panel');
     await menu(['extra']);
     expect(
       '设置菜单：自定义指令转到设置编辑器',
